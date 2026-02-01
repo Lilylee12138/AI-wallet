@@ -1,63 +1,75 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.28;
 
-/**
- * @title DiamondAccount - A minimal Diamond (proxy) pattern account
- */
-contract DiamondAccount {
-    error OnlyOwner();
-    error FacetNotFound();
-    error DelegateCallFailed();
+import "./LibDiamond.sol";
 
-    address public owner;
-    
-    // Mapping of function selectors to facet addresses
-    mapping(bytes4 => address) public facets;
+/// @notice Minimal Diamond-like proxy for selector routing (MVP).
+/// Upgraded: uses shared storage (LibDiamond) + bubbles up delegatecall revert reason.
+contract DiamondAccount {
+    error FacetNotSet(bytes4 selector);
 
     constructor(address _owner) {
-        owner = _owner;
+        LibDiamond.setOwner(_owner);
     }
 
-    /**
-     * @notice Set a facet for a function selector
-     */
-    function setFacet(bytes4 selector, address facetAddress) external {
-        if (msg.sender != owner) {
-            revert OnlyOwner();
-        }
-        facets[selector] = facetAddress;
+    modifier onlyOwner() {
+        LibDiamond.enforceIsOwner();
+        _;
     }
 
-    /**
-     * @notice Fallback function that routes calls to appropriate facets
-     */
+    /// @notice Set routing for a function selector to a facet address.
+    /// MVP management: owner-only.
+    function setFacet(bytes4 selector, address facet) external onlyOwner {
+        LibDiamond.setFacet(selector, facet);
+    }
+
+    /// @notice Debug helper: which facet is used for a selector.
+    function facetOf(bytes4 selector) external view returns (address) {
+        return LibDiamond.facetOf(selector);
+    }
+
+    /// @notice Owner getter (keeps ABI similar to `address public owner`).
+    function owner() external view returns (address) {
+        return LibDiamond.owner();
+    }
+
+    /// @notice Configure EntryPoint (useful soon for AA).
+    function setEntryPoint(address ep) external onlyOwner {
+        LibDiamond.setEntryPoint(ep);
+    }
+
+    function entryPoint() external view returns (address) {
+        return LibDiamond.entryPoint();
+    }
+
     fallback() external payable {
-        _delegateToFacet();
+        address facet = LibDiamond.facetOf(msg.sig);
+        if (facet == address(0)) revert FacetNotSet(msg.sig);
+        _delegateToFacet(facet);
     }
 
     receive() external payable {}
 
-    /**
-     * @notice Delegates the call to the appropriate facet
-     */
-    function _delegateToFacet() private {
-        bytes4 selector = msg.sig;
-        address facet = facets[selector];
-        
-        if (facet == address(0)) {
-            revert FacetNotFound();
-        }
+    /// @dev Delegate the current calldata to `facet` and bubble up revert reason.
+    function _delegateToFacet(address facet) internal {
+        assembly ("memory-safe") {
+            // Copy calldata to memory starting at position 0
+            calldatacopy(0, 0, calldatasize())
 
-        // Call the facet with the full calldata
-        (bool success, bytes memory result) = facet.delegatecall(msg.data);
-        
-        if (!success) {
-            revert DelegateCallFailed();
-        }
-        
-        // Return the result
-        assembly {
-            return(add(result, 0x20), mload(result))
+            // Delegatecall into the facet
+            let result := delegatecall(gas(), facet, 0, calldatasize(), 0, 0)
+
+            // Copy returndata to memory
+            returndatacopy(0, 0, returndatasize())
+
+            // Bubble up revert reason or return data
+            switch result
+            case 0 {
+                revert(0, returndatasize())
+            }
+            default {
+                return(0, returndatasize())
+            }
         }
     }
 }

@@ -27,5 +27,7 @@
     "declarationMap": true,
     "sourceMap": true,
     "jsx": "react-jsx"
+    ,
+    "types": ["node", "mocha", "hardhat"]
   }
 }
