@@ -73,6 +73,9 @@ describe('EntryPoint.handleOps -> DiamondAccount (Validation + Execution + Nonce
       entryPoint
     )
 
+    // mode=0 prefix for ValidationFacet
+    packedOp.signature = ethers.utils.hexConcat(['0x00', packedOp.signature])
+
     // 10) Execute via EntryPoint.handleOps
     await (await entryPoint.handleOps([packedOp], beneficiary.address)).wait()
 
