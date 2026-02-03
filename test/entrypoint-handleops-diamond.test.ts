@@ -1,6 +1,8 @@
 import { expect } from 'chai'
 import { ethers } from 'hardhat'
 import { fillSignAndPack } from './UserOp'
+import { wrapSigMode0, wrapSigMode1Passkey, wrapSigMode2OAuth } from './helpers/aaSig'
+import { signIssuerAuth } from './helpers/issuer'
 
 describe('EntryPoint.handleOps -> DiamondAccount (Validation + Execution + Nonce)', function () {
   it('should validate and execute via mode=0 (EOA) via handleOps', async function () {
@@ -84,7 +86,7 @@ describe('EntryPoint.handleOps -> DiamondAccount (Validation + Execution + Nonce
       entryPoint
     )
 
-    packedOp.signature = ethers.utils.hexConcat(['0x00', packedOp.signature])
+    packedOp.signature = wrapSigMode0(packedOp.signature)
 
     await (await entryPoint.handleOps([packedOp], beneficiary.address)).wait()
 
@@ -192,24 +194,27 @@ describe('EntryPoint.handleOps -> DiamondAccount (Validation + Execution + Nonce
 
     const userOpHash = await entryPoint.getUserOpHash(packedOp)
 
-    const MODE_PASSKEY_SESSION = 1
     const sessionNonce = 1
 
-    const msgHash = ethers.utils.keccak256(
-      ethers.utils.solidityPack(
-        ['string', 'address', 'uint8', 'bytes32', 'address', 'uint48', 'uint32', 'uint64'],
-        ['AA_SESSION_AUTH_V1', diamond.address, MODE_PASSKEY_SESSION, userOpHash, sessionSigner, validUntil, scope, sessionNonce]
-      )
-    )
+    const issuerSig = await signIssuerAuth({
+      issuer,
+      diamond: diamond.address,
+      mode: 1,
+      userOpHash,
+      sessionSigner,
+      validUntil,
+      scope,
+      sessionNonce
+    })
 
-    const issuerSig = await issuer.signMessage(ethers.utils.arrayify(msgHash))
-
-    const payload = ethers.utils.defaultAbiCoder.encode(
-      ['bytes32', 'address', 'uint48', 'uint32', 'uint64', 'bytes'],
-      [credentialIdHash, sessionSigner, validUntil, scope, sessionNonce, issuerSig]
-    )
-
-    packedOp.signature = ethers.utils.hexConcat(['0x01', payload])
+    packedOp.signature = wrapSigMode1Passkey({
+      credentialIdHash,
+      sessionSigner,
+      validUntil,
+      scope,
+      sessionNonce,
+      issuerSig
+    })
 
     await (await entryPoint.handleOps([packedOp], beneficiary.address)).wait()
 
@@ -313,26 +318,26 @@ describe('EntryPoint.handleOps -> DiamondAccount (Validation + Execution + Nonce
 
     const userOpHash = await entryPoint.getUserOpHash(packedOp)
 
-    const MODE_OAUTH_SESSION = 2
     const sessionNonce = 1
 
-    const msgHash = ethers.utils.keccak256(
-      ethers.utils.solidityPack(
-        ['string', 'address', 'uint8', 'bytes32', 'address', 'uint48', 'uint32', 'uint64'],
-        ['AA_SESSION_AUTH_V1', diamond.address, MODE_OAUTH_SESSION, userOpHash, sessionSigner, validUntil, scope, sessionNonce]
-      )
-    )
+    const issuerSig = await signIssuerAuth({
+      issuer,
+      diamond: diamond.address,
+      mode: 2,
+      userOpHash,
+      sessionSigner,
+      validUntil,
+      scope,
+      sessionNonce
+    })
 
-    const issuerSig = await issuer.signMessage(ethers.utils.arrayify(msgHash))
-
-    // mode=2 payload:
-    // abi.encode(address sessionSigner, uint48 validUntil, uint32 scope, uint64 sessionNonce, bytes issuerSig)
-    const payload = ethers.utils.defaultAbiCoder.encode(
-      ['address', 'uint48', 'uint32', 'uint64', 'bytes'],
-      [sessionSigner, validUntil, scope, sessionNonce, issuerSig]
-    )
-
-    packedOp.signature = ethers.utils.hexConcat(['0x02', payload])
+    packedOp.signature = wrapSigMode2OAuth({
+      sessionSigner,
+      validUntil,
+      scope,
+      sessionNonce,
+      issuerSig
+    })
 
     await (await entryPoint.handleOps([packedOp], beneficiary.address)).wait()
 
