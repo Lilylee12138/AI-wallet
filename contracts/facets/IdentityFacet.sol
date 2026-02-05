@@ -73,4 +73,11 @@ contract IdentityFacet {
         LibIdentity.Session memory s = LibIdentity.getSession(sessionSigner);
         return (s.validUntil, s.scope, s.nonce, s.exists);
     }
+
+    // --- DAO / AI hook ---
+    // @notice Returns last validated memberId written during validateUserOp
+    function currentMemberId() external view returns (bytes32) {
+        return LibIdentity.getCurrentMemberId();
+    }
+
 }

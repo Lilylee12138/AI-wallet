@@ -56,7 +56,12 @@ contract ValidationFacet {
             if (!_validateOwnerEOA(sig[1:], userOpHash)) {
                 return SIG_VALIDATION_FAILED;
             }
-        } else if (mode == MODE_PASSKEY_SESSION) {
+        
+            // DAO/AI auth context: write validated memberId (no re-auth)
+            bytes32 memberId = keccak256(abi.encodePacked("EOA", LibDiamond.owner()));
+            LibIdentity.setCurrentMemberId(memberId);
+
+} else if (mode == MODE_PASSKEY_SESSION) {
             if (!_validatePasskeySession(sig[1:], userOpHash)) {
                 return SIG_VALIDATION_FAILED;
             }
@@ -126,8 +131,13 @@ if (!_validateIssuerSessionAuth(
             sessionNonce,
             issuerSig
         )) { return false; }
+        // DAO/AI auth context: write validated memberId (no re-auth)
+        address issuer = LibIdentity.getTrustedIssuer();
+        bytes32 memberId = keccak256(abi.encodePacked("PASSKEY", issuer, sessionSigner));
+        LibIdentity.setCurrentMemberId(memberId);
 
         return true;
+
     }
 
     // ------------------------------------------------------------
@@ -154,8 +164,13 @@ if (!_validateIssuerSessionAuth(
             sessionNonce,
             issuerSig
         )) { return false; }
+        // DAO/AI auth context: write validated memberId (no re-auth)
+        address issuer = LibIdentity.getTrustedIssuer();
+        bytes32 memberId = keccak256(abi.encodePacked("OAUTH", issuer, sessionSigner));
+        LibIdentity.setCurrentMemberId(memberId);
 
         return true;
+
     }
 
     // ------------------------------------------------------------
@@ -209,7 +224,6 @@ address issuer = LibIdentity.getTrustedIssuer();
         if (s.scope != 0) {
             // subset check: (payload & ~stored) == 0
             if ((scope & ~s.scope) != 0) { return false; }
-        return true;
         }
 
         // verify issuer signature

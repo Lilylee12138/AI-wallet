@@ -19,7 +19,10 @@ library LibIdentity {
         mapping(address => Session) sessions; // sessionSigner => session
         mapping(bytes32 => bool) passkeyEnabled; // credentialIdHash => enabled
         mapping(bytes32 => bytes32) passkeyRpIdHash; // optional metadata
-    }
+    
+        // DAO/AI hook: last validated memberId (written by ValidationFacet)
+        bytes32 currentMemberId;
+}
 
     function ds() internal pure returns (IdentityStorage storage s) {
         bytes32 pos = IDENTITY_STORAGE_POSITION;
@@ -77,4 +80,16 @@ library LibIdentity {
     function bumpSessionNonce(address sessionSigner, uint64 newNonce) internal {
         ds().sessions[sessionSigner].nonce = newNonce;
     }
+
+    // ===== DAO/AI hook: last validated memberId (written by ValidationFacet) =====
+    function setCurrentMemberId(bytes32 memberId) internal {
+        IdentityStorage storage s = ds();
+        s.currentMemberId = memberId;
+    }
+
+    function getCurrentMemberId() internal view returns (bytes32) {
+        IdentityStorage storage s = ds();
+        return s.currentMemberId;
+    }
+
 }
