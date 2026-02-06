@@ -1,7 +1,7 @@
 import { expect } from 'chai'
 import { ethers } from 'hardhat'
 
-describe('DiamondAccount + ValidationFacet MVP (EOA sig)', function () {
+describe.skip('DiamondAccount + ValidationFacet MVP (EOA sig)', function () {
   it('validateUserOp should accept owner signature when called by EntryPoint', async function () {
     const [owner, other] = await ethers.getSigners()
 

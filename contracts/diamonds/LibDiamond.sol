@@ -95,7 +95,8 @@ library LibDiamond {
 
     function enforceIsOwnerOrEntryPoint() internal view {
         DiamondStorage storage ds = diamondStorage();
-        if (msg.sender != ds.owner && msg.sender != ds.entryPoint) {
+        // allow: owner, EntryPoint, or the Diamond itself (self-call from another facet)
+        if (msg.sender != ds.owner && msg.sender != ds.entryPoint && msg.sender != address(this)) {
             revert("LibDiamond: not owner or entryPoint");
         }
     }
