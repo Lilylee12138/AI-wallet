@@ -39,10 +39,15 @@ async function main () {
   const identityFacet = await IdentityFacet.deploy()
   await identityFacet.deployed()
 
+  const DaoFacet = await ethers.getContractFactory('DaoFacet')
+  const daoFacet = await DaoFacet.deploy()
+  await daoFacet.deployed()
+
   console.log('ExecutionFacet =', execFacet.address)
   console.log('NonceFacet     =', nonceFacet.address)
   console.log('ValidationFacet=', validationFacet.address)
   console.log('IdentityFacet  =', identityFacet.address)
+  console.log('DaoFacet       =', daoFacet.address)
 
   // 4. DiamondAccount
   const DiamondAccount = await ethers.getContractFactory('DiamondAccount')
@@ -82,11 +87,28 @@ async function main () {
     'getPasskeyRpIdHash(bytes32)',
     'setSession(address,uint48,uint32,uint64)',
     'revokeSession(address)',
-    'getSession(address)'
+    'getSession(address)',
+    'currentMemberId()'
   ]
 
   for (const sig of idSigs) {
     await set(sig, identityFacet.address)
+  }
+
+  // DaoFacet
+  const daoSigs = [
+    'addMember(bytes32)',
+    'isMember(bytes32)',
+    'propose(string,address,uint256,bytes,uint64,bytes32,string)',
+    'castVote(uint256,uint8)',
+    'finalize(uint256)',
+    'execute(uint256)',
+    'getProposal(uint256)',
+    'state(uint256)'
+  ]
+
+  for (const sig of daoSigs) {
+    await set(sig, daoFacet.address)
   }
 
   // 6. Save deployments/local.json
@@ -95,7 +117,8 @@ async function main () {
     entryPoint: entryPoint.address,
     diamond: diamond.address,
     counter: counter.address,
-    owner: owner.address
+    owner: owner.address,
+    daoFacet: daoFacet.address
   }
 
   const outDir = path.join(__dirname, '..', 'deployments')
