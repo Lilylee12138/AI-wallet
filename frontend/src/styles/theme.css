@@ -163,3 +163,132 @@ hr.sep{
   justify-content:center;
   font-weight: 900;
 }
+
+/* ===== GasTankCard helpers (safe append) ===== */
+.mono { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace; }
+
+.card {
+  border: 1px solid rgba(255,255,255,0.08);
+  background: rgba(10, 20, 35, 0.55);
+  backdrop-filter: blur(12px);
+  border-radius: 22px;
+  padding: 18px;
+  box-shadow: 0 10px 30px rgba(0,0,0,0.35);
+}
+
+.cardHeaderRow {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 14px;
+}
+
+.cardTitle {
+  font-size: 18px;
+  font-weight: 700;
+  color: rgba(255,255,255,0.92);
+}
+
+.cardSub {
+  font-size: 12px;
+  margin-top: 4px;
+  color: rgba(255,255,255,0.60);
+}
+
+.grid2 {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 12px;
+  margin: 10px 0 14px;
+}
+
+.statBox {
+  border: 1px solid rgba(255,255,255,0.06);
+  background: rgba(255,255,255,0.03);
+  border-radius: 16px;
+  padding: 12px;
+}
+
+.statLabel {
+  font-size: 12px;
+  color: rgba(255,255,255,0.60);
+}
+
+.statValue {
+  font-size: 20px;
+  font-weight: 800;
+  margin-top: 6px;
+  color: rgba(255,255,255,0.92);
+}
+
+.rowGap { display: flex; flex-direction: column; gap: 10px; }
+
+.row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;   /* 允许自动换行 */
+}
+
+.input {
+  flex: 1;
+  min-width: 140px;   /* 关键：保证最小宽度 */
+  height: 42px;       /* 稍微加高一点 */
+  font-size: 16px;    /* 数字更清晰 */
+  border: 1px solid rgba(255,255,255,0.10);
+  background: rgba(0,0,0,0.22);
+  color: rgba(255,255,255,0.92);
+  border-radius: 14px;
+  padding: 10px 14px;
+  outline: none;
+}
+
+.btnPrimary {
+  border: 0;
+  border-radius: 16px;
+  padding: 12px 14px;
+  font-weight: 800;
+  cursor: pointer;
+  color: rgba(0,0,0,0.85);
+  background: linear-gradient(90deg, #55f5b4, #3d79ff);
+}
+
+.btnPrimary:disabled { opacity: 0.6; cursor: not-allowed; }
+
+.btnSmall {
+  border: 1px solid rgba(255,255,255,0.12);
+  background: rgba(255,255,255,0.06);
+  color: rgba(255,255,255,0.86);
+  border-radius: 12px;
+  padding: 10px 10px;
+  cursor: pointer;
+}
+
+.btnSmall:disabled { opacity: 0.6; cursor: not-allowed; }
+
+.btnGhost {
+  border: 1px solid rgba(255,255,255,0.12);
+  background: transparent;
+  color: rgba(255,255,255,0.80);
+  border-radius: 14px;
+  padding: 10px 12px;
+  cursor: pointer;
+}
+
+.btnGhost:disabled { opacity: 0.6; cursor: not-allowed; }
+
+.errorBox {
+  border: 1px solid rgba(255,80,80,0.35);
+  background: rgba(255,80,80,0.08);
+  color: rgba(255,220,220,0.92);
+  border-radius: 14px;
+  padding: 10px 12px;
+  font-size: 13px;
+}
+
+.hint {
+  font-size: 12px;
+  color: rgba(255,255,255,0.55);
+  line-height: 1.4;
+}

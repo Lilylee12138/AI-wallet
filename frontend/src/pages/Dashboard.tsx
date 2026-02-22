@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react'
 import Layout from '../components/Layout'
+import GasTankCard from '../components/GasTankCard'
 import { ethers } from 'ethers'
 import { getInjectedProvider, requestAccounts, getChainId } from '../lib/eth'
 import { loadDeployments } from '../config/deployments'
@@ -46,6 +47,10 @@ export default function Dashboard() {
           <div style={{ marginTop: 8, fontWeight: 900 }}>{diamond.slice(0, 10)}…</div>
           <div className='small' style={{ marginTop: 8 }}>Balance</div>
           <div className='h1' style={{ marginTop: 4 }}>{bal} ETH</div>
+        </div>
+
+        <div style={{ marginTop: 14 }}>
+          {diamond && <GasTankCard diamondAccount={diamond} />}
         </div>
 
         <div className='card' style={{ padding: 16, width: 150 }}>

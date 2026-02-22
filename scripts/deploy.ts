@@ -1,201 +1,175 @@
-import { ethers } from 'hardhat'
-import fs from 'fs'
-import path from 'path'
-function ensureDir(p: string) {
-  if (!fs.existsSync(p)) {
-    fs.mkdirSync(p, { recursive: true })
-  }
-}
+import { ethers } from "hardhat"
+import fs from "fs"
+import path from "path"
 
-function selectorOf(sig: string) {
-  return ethers.utils.id(sig).slice(0, 10)
+function ensureDir(p: string) {
+  if (!fs.existsSync(p)) fs.mkdirSync(p, { recursive: true })
 }
 
 async function main() {
-  const [deployer, owner] = await ethers.getSigners()
-  const net = await ethers.provider.getNetwork()
-  const chainId = net.chainId
+  const signers = await ethers.getSigners()
+  const ownerIndex = Number(process.env.OWNER_INDEX ?? "0")
+  const owner = signers[ownerIndex]
+  if (!owner) throw new Error(`Invalid OWNER_INDEX=${ownerIndex}, signers.length=${signers.length}`)
 
-  console.log('chainId =', chainId)
-  console.log('deployer =', deployer.address)
-  console.log('owner =', owner.address)
+  console.log("Deploying with owner index:", ownerIndex)
+  console.log("Deploying with owner:", owner.address)
 
-  let entryPointAddr = ''
+  // 1) Deploy EntryPoint
+  const EntryPoint = await ethers.getContractFactory("EntryPoint")
+  const entryPoint = await EntryPoint.deploy()
+  await entryPoint.deployed()
+  console.log("EntryPoint:", entryPoint.address)
 
-  if (chainId === 31337) {
-    const EntryPoint = await ethers.getContractFactory('EntryPoint')
-    const entryPoint = await EntryPoint.deploy()
-    await entryPoint.deployed()
-    entryPointAddr = entryPoint.address
-    console.log('EntryPoint (local) =', entryPointAddr)
-  } else {
-    entryPointAddr = process.env.SEPOLIA_ENTRYPOINT || ''
-    if (!entryPointAddr) {
-      throw new Error('Missing SEPOLIA_ENTRYPOINT in .env')
-    }
-    console.log('EntryPoint (external) =', entryPointAddr)
-  }
+  // 2) Deploy DiamondAccount
+  const DiamondAccount = await ethers.getContractFactory("DiamondAccount")
+  const diamond = await DiamondAccount.deploy(owner.address)
+  await diamond.deployed()
+  console.log("DiamondAccount:", diamond.address)
 
-  const Counter = await ethers.getContractFactory('Counter')
-  const counter = await Counter.deploy()
-  await counter.deployed()
-  console.log('Counter =', counter.address)
+  // set entryPoint (fix EntryPointNotSet)
+  const txSetEP = await diamond.connect(owner).setEntryPoint(entryPoint.address)
+  await txSetEP.wait()
+  console.log("[diamond] setEntryPoint:", entryPoint.address)
 
-  const ExecutionFacet = await ethers.getContractFactory('ExecutionFacet')
-  const execFacet = await ExecutionFacet.deploy()
-  await execFacet.deployed()
-
-  const NonceFacet = await ethers.getContractFactory('NonceFacet')
-  const nonceFacet = await NonceFacet.deploy()
-  await nonceFacet.deployed()
-
-  const ValidationFacet = await ethers.getContractFactory('ValidationFacet')
+  // 3) Deploy facets
+  const ValidationFacet = await ethers.getContractFactory("ValidationFacet")
   const validationFacet = await ValidationFacet.deploy()
   await validationFacet.deployed()
 
-  const IdentityFacet = await ethers.getContractFactory('IdentityFacet')
+  const ExecutionFacet = await ethers.getContractFactory("ExecutionFacet")
+  const executionFacet = await ExecutionFacet.deploy()
+  await executionFacet.deployed()
+
+  const IdentityFacet = await ethers.getContractFactory("IdentityFacet")
   const identityFacet = await IdentityFacet.deploy()
   await identityFacet.deployed()
 
-  const DaoFacet = await ethers.getContractFactory('DaoFacet')
+  const DaoFacet = await ethers.getContractFactory("DaoFacet")
   const daoFacet = await DaoFacet.deploy()
   await daoFacet.deployed()
 
-  console.log('ExecutionFacet =', execFacet.address)
-  console.log('NonceFacet =', nonceFacet.address)
-  console.log('ValidationFacet =', validationFacet.address)
-  console.log('IdentityFacet =', identityFacet.address)
-  console.log('DaoFacet =', daoFacet.address)
+  const NonceFacet = await ethers.getContractFactory("NonceFacet")
+  const nonceFacet = await NonceFacet.deploy()
+  await nonceFacet.deployed()
 
-  const DiamondAccount = await ethers.getContractFactory('DiamondAccount')
-  const diamond = await DiamondAccount.deploy(owner.address)
-  await diamond.deployed()
-  console.log('DiamondAccount =', diamond.address)
+  const EntryPointDepositFacet = await ethers.getContractFactory("EntryPointDepositFacet")
+  const depositFacet = await EntryPointDepositFacet.deploy()
+  await depositFacet.deployed()
 
-  await (await diamond.connect(owner).setEntryPoint(entryPointAddr)).wait()
+  console.log("Facets deployed:")
+  console.log("  ValidationFacet:", validationFacet.address)
+  console.log("  ExecutionFacet:", executionFacet.address)
+  console.log("  IdentityFacet:", identityFacet.address)
+  console.log("  DaoFacet:", daoFacet.address)
+  console.log("  NonceFacet:", nonceFacet.address)
+  console.log("  EntryPointDepositFacet:", depositFacet.address)
 
-  const set = async (sig: string, facetAddr: string) => {
-    const sel = selectorOf(sig)
-    await (await diamond.connect(owner).setFacet(sel, facetAddr)).wait()
-  }
-
-  await set('execute(address,uint256,bytes)', execFacet.address)
-  await set('getNonce()', nonceFacet.address)
-  await set('useNonce()', nonceFacet.address)
-
-  await set(
-    'validateUserOp((address,uint256,bytes,bytes,bytes32,uint256,bytes32,bytes,bytes),bytes32,uint256)',
-    validationFacet.address
-  )
-
-  const idSigs = [
-    'setTrustedIssuer(address)',
-    'getTrustedIssuer()',
-    'registerPasskey(bytes32,bytes32)',
-    'disablePasskey(bytes32)',
-    'isPasskeyEnabled(bytes32)',
-    'getPasskeyRpIdHash(bytes32)',
-    'setSession(address,uint48,uint32,uint64)',
-    'revokeSession(address)',
-    'getSession(address)',
-    'currentMemberId()'
-  ]
-
-  for (const sig of idSigs) {
-    await set(sig, identityFacet.address)
-  }
-
-  const daoSigs = [
-    'addMember(bytes32)',
-    'isMember(bytes32)',
-    'propose(string,address,uint256,bytes,uint64,bytes32,string)',
-    'castVote(uint256,uint8)',
-    'finalize(uint256)',
-    'execute(uint256)',
-    'getProposal(uint256)',
-    'state(uint256)',
-    'seedProposalAsOwner(string,address,uint256,bytes,uint64,bytes32,string)'
-  ]
-
-  for (const sig of daoSigs) {
-    await set(sig, daoFacet.address)
-  }
-
-  const trustedIssuer = process.env.TRUSTED_ISSUER || deployer.address
-  const identity = await ethers.getContractAt('IdentityFacet', diamond.address)
-  await (await identity.connect(owner).setTrustedIssuer(trustedIssuer)).wait()
-
-  const dao = await ethers.getContractAt('DaoFacet', diamond.address)
-
-  const memberA = ethers.utils.keccak256(
-    ethers.utils.toUtf8Bytes('member:owner')
-  )
-  const memberB = ethers.utils.keccak256(
-    ethers.utils.toUtf8Bytes('member:deployer')
-  )
-
-  await (await dao.connect(owner).addMember(memberA)).wait()
-  await (await dao.connect(owner).addMember(memberB)).wait()
-
-  const votingPeriod = 3600
-  const emptyHash = ethers.constants.HashZero
-  const metaURI = 'ipfs://demo'
-
-  const counterIface = new ethers.utils.Interface(['function increment()'])
-  const incData = counterIface.encodeFunctionData('increment')
-
-  const seed = async (title: string) => {
-    const tx = await dao.connect(owner).seedProposalAsOwner(
-      title,
-      counter.address,
-      0,
-      incData,
-      votingPeriod,
-      emptyHash,
-      metaURI
-    )
-    await tx.wait()
-  }
-
-  await seed('TIP-40: Security Audit Funding')
-  await seed('TIP-41: Treasury Diversification')
-  await seed('TIP-42: Liquidity Pool Update')
-  await seed('TIP-43: Gas Optimization Grant')
-  await seed('TIP-44: Passkey Adoption Incentive')
-
-  const out = {
-    chainId,
-    entryPoint: entryPointAddr,
-    diamondAccount: diamond.address,
-    counter: counter.address,
-    owner: owner.address,
-    facets: {
-      ExecutionFacet: execFacet.address,
-      NonceFacet: nonceFacet.address,
-      ValidationFacet: validationFacet.address,
-      IdentityFacet: identityFacet.address,
-      DaoFacet: daoFacet.address
+  // 4) Register facets via setFacet
+  async function registerFacet(facet: any) {
+    const selectors = Object.keys(facet.interface.functions).map((fn) => facet.interface.getSighash(fn))
+    for (const sel of selectors) {
+      const tx = await diamond.connect(owner).setFacet(sel, facet.address)
+      await tx.wait()
     }
   }
 
-  const rootDeployDir = path.join(__dirname, '..', 'deployments')
+  await registerFacet(validationFacet)
+  await registerFacet(executionFacet)
+  await registerFacet(identityFacet)
+  await registerFacet(daoFacet)
+  await registerFacet(nonceFacet)
+  await registerFacet(depositFacet)
+
+  console.log("Facets registered")
+
+  // 5) Bind critical selectors (avoid FacetNotSet)
+  const daoCriticalSigs = [
+    "seedProposalAsOwner(string,address,uint256,bytes,uint64,bytes32,string)",
+    "propose(string,address,uint256,bytes,uint64,bytes32,string)",
+    "castVoteAs(uint256,uint8,bytes32)",
+    "castVote(uint256,uint8)",
+    "getProposal(uint256)",
+    "state(uint256)",
+    "addMember(bytes32)",
+    "isMember(bytes32)",
+  ]
+  for (const sig of daoCriticalSigs) {
+    const sel = daoFacet.interface.getSighash(sig)
+    const tx = await diamond.connect(owner).setFacet(sel, daoFacet.address)
+    await tx.wait()
+  }
+
+  const depositCriticalSigs = [
+    "getEntryPointDeposit()",
+    "depositToEntryPoint()",
+    "withdrawDepositTo(address,uint256)",
+  ]
+  for (const sig of depositCriticalSigs) {
+    const sel = depositFacet.interface.getSighash(sig)
+    const tx = await diamond.connect(owner).setFacet(sel, depositFacet.address)
+    await tx.wait()
+  }
+
+  // 6) DAO members (MVP)
+  const identityAsDiamond = new ethers.Contract(
+    diamond.address,
+    ["function currentMemberId() view returns (bytes32)"],
+    owner
+  )
+
+  let ownerMemberId = ethers.constants.HashZero
+  try { ownerMemberId = await identityAsDiamond.currentMemberId() } catch {}
+  const addrBasedMid = ethers.utils.hexZeroPad(owner.address, 32)
+
+  const daoAsDiamond = new ethers.Contract(diamond.address, ["function addMember(bytes32)"], owner)
+  for (const mid of Array.from(new Set([ownerMemberId, ethers.constants.HashZero, addrBasedMid]))) {
+    await (await daoAsDiamond.addMember(mid)).wait()
+  }
+
+  // 7) Seed proposals
+  const daoSeed = new ethers.Contract(
+    diamond.address,
+    ["function seedProposalAsOwner(string,address,uint256,bytes,uint64,bytes32,string) returns (uint256)"],
+    owner
+  )
+
+  const votingPeriod = 7 * 24 * 60 * 60
+  const target = ethers.constants.AddressZero
+  const value = 0
+  const data = "0x"
+  const metaHash = ethers.constants.HashZero
+
+  const proposals: Array<[string, string]> = [
+    ["TIP-40: Security Audit Funding", "Fund external audit firm."],
+    ["TIP-41: Treasury Diversification", "Diversify treasury assets."],
+    ["TIP-42: Liquidity Pool Update", "Update LP incentives."],
+    ["TIP-43: Governance Upgrade", "Upgrade governance mechanism."],
+    ["TIP-44: Passkey Adoption Incentive", "Incentivize passkey users."],
+  ]
+
+  for (const [title, desc] of proposals) {
+    const description = `${title}\n\n${desc}`
+    await (await daoSeed.seedProposalAsOwner(description, target, value, data, votingPeriod, metaHash, "")).wait()
+  }
+
+  // 8) Save + sync deployments
+  const chainId = (await ethers.provider.getNetwork()).chainId
+  const deployment = { chainId, entryPoint: entryPoint.address, diamondAccount: diamond.address }
+
+  const rootDeployDir = path.join(__dirname, "../deployments")
   ensureDir(rootDeployDir)
-  fs.writeFileSync(
-    path.join(rootDeployDir, `${chainId}.json`),
-    JSON.stringify(out, null, 2)
-  )
+  fs.writeFileSync(path.join(rootDeployDir, "31337.json"), JSON.stringify(deployment, null, 2))
 
-  const feDeployDir = path.join(__dirname, '..', 'frontend', 'public', 'deployments')
+  const feDeployDir = path.join(__dirname, "../frontend/public/deployments")
   ensureDir(feDeployDir)
-  fs.writeFileSync(
-    path.join(feDeployDir, `${chainId}.json`),
-    JSON.stringify(out, null, 2)
-  )
+  fs.writeFileSync(path.join(feDeployDir, "31337.json"), JSON.stringify(deployment, null, 2))
 
-  console.log('Deployment complete')
+  console.log("Deployment saved + synced.")
+  console.log("frontend/public/deployments/31337.json updated.")
 }
 
 main().catch((e) => {
   console.error(e)
-  process.exit(1)
+  process.exitCode = 1
 })

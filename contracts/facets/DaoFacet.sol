@@ -22,8 +22,7 @@ contract DaoFacet {
     // Internal helpers
     // =============================================================
 
-    /// @dev DAO state-changing ops must go through ERC-4337 EntryPoint,
-    /// otherwise `currentMemberId` (auth context) could be abused.
+    /// @dev DAO state-changing ops must go through ERC-4337 EntryPoint
     modifier onlyEntryPoint() {
         LibDiamond.enforceIsEntryPoint();
         _;
@@ -35,6 +34,22 @@ contract DaoFacet {
 
     function _requireMember(bytes32 memberId) internal view {
         if (!LibDao.isMember(memberId)) revert NotMember();
+    }
+
+    function _castVoteInternal(uint256 proposalId, uint8 support, bytes32 memberId) internal {
+        _requireMember(memberId);
+
+        LibDao.Proposal storage p = LibDao.getProposal(proposalId);
+
+        LibDao.ProposalState st = LibDao.state(proposalId);
+        if (st != LibDao.ProposalState.Active) revert InvalidState();
+
+        if (block.timestamp > p.endTime) revert VotingClosed();
+        if (LibDao.hasVoted(proposalId, memberId)) revert AlreadyVoted();
+
+        LibDao.castVote(proposalId, memberId, support);
+
+        emit VoteCast(proposalId, memberId, support, 1);
     }
 
     // =============================================================
@@ -66,7 +81,6 @@ contract DaoFacet {
         bytes32 memberId = _currentMemberId();
         _requireMember(memberId);
 
-        // IMPORTANT: proposer should be the smart account (diamond), not EntryPoint
         proposalId = LibDao.createProposal(
             address(this),
             description,
@@ -82,21 +96,16 @@ contract DaoFacet {
     }
 
     /// @param support 1=for, 2=against, 3=abstain
+    /// @dev Old path: relies on LibIdentity auth-context (may fail under AA if context not set)
     function castVote(uint256 proposalId, uint8 support) external onlyEntryPoint {
         bytes32 memberId = _currentMemberId();
-        _requireMember(memberId);
+        _castVoteInternal(proposalId, support, memberId);
+    }
 
-        LibDao.Proposal storage p = LibDao.getProposal(proposalId);
-
-        LibDao.ProposalState st = LibDao.state(proposalId);
-        if (st != LibDao.ProposalState.Active) revert InvalidState();
-
-        if (block.timestamp > p.endTime) revert VotingClosed();
-        if (LibDao.hasVoted(proposalId, memberId)) revert AlreadyVoted();
-
-        LibDao.castVote(proposalId, memberId, support);
-
-        emit VoteCast(proposalId, memberId, support, 1);
+    /// @param support 1=for, 2=against, 3=abstain
+    /// @dev New path: frontend passes memberId explicitly (best for your current AA demo)
+    function castVoteAs(uint256 proposalId, uint8 support, bytes32 memberId) external onlyEntryPoint {
+        _castVoteInternal(proposalId, support, memberId);
     }
 
     function finalize(uint256 proposalId) external onlyEntryPoint {
@@ -131,7 +140,6 @@ contract DaoFacet {
     // Views
     // =============================================================
 
-    /// @dev Return a memory copy for frontend reads.
     function getProposal(uint256 proposalId) external view returns (LibDao.Proposal memory out) {
         LibDao.Proposal storage p = LibDao.getProposal(proposalId);
         out.proposer = p.proposer;

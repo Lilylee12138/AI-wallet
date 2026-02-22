@@ -1,4 +1,4 @@
-import { ReactNode } from 'react'
+import type { ReactNode } from 'react'
 import BottomNav from './BottomNav'
 import ChatbotButton from './ChatbotButton'
 
