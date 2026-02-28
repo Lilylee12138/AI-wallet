@@ -1,0 +1,19 @@
+{
+  "model": "xgboost",
+  "version": "transfer_0003",
+  "features": [
+    "value_eth",
+    "is_new_recipient",
+    "interaction_count",
+    "gas_gwei",
+    "blacklist_hit",
+    "repeat_tx"
+  ],
+  "label": "label",
+  "threshold_default": 0.5,
+  "train_rows": 27920,
+  "test_rows": 6980,
+  "scale_pos_weight": 4.132352941176471,
+  "dataset": "transfer_v3.csv (stage1 + malicious_hard + normal_border)",
+  "notes": "v3 introduces hard malicious + borderline normal to reduce shortcut learning and improve generalization"
+}

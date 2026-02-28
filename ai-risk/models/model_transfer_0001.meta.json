@@ -1,0 +1,14 @@
+{
+  "model_id": 1,
+  "type": "transfer",
+  "features": [
+    "value_eth",
+    "is_new_recipient",
+    "interaction_count",
+    "gas_gwei",
+    "blacklist_hit",
+    "repeat_tx"
+  ],
+  "auc": 1.0,
+  "data": "SyntheticRisk_transfer.csv"
+}

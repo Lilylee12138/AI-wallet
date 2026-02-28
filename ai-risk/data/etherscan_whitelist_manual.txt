@@ -1,0 +1,18 @@
+# verified etherscan labels
+
+# Binance 9
+0x001866Ae5B3de6cAa5a51543FD9fB64f524F5478
+# Coinbase 1 - Exchange
+0xe85F78ABB12594f3e73dC68bAE19d216Ba328697
+# Coinbase 8
+0xE1A0DDeb9b5b55E489977b438764e60e314E917c
+# Uniswap V3: Router
+0xe592427a0aece92de3edee1f18e0157c05861564
+# Uniswap V2 Router 2
+0x7a250d5630b4cf539739df2c5dacab4c659f2488d
+# Universal Router
+0x3fc91a3afd70395cd496c647d5a6cc9d4b2b7fad
+# 1inch Router 2
+0xe069cb01d06ba617bcdf789bf2ff0d5e5ca20c71
+# Binance 14
+0x28C6c06298d514Db089934071355E5743bf21d60
