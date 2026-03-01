@@ -5,6 +5,7 @@ import "../diamonds/LibDiamond.sol";
 import "../libs/LibNonce.sol";
 import "../libs/LibValidation.sol";
 import "../libs/LibIdentity.sol";
+import "../libs/LibRiskOracle.sol";
 import "../interfaces/PackedUserOperation.sol";
 
 /// @notice AA-ready ValidationFacet for ERC-4337 EntryPoint.handleOps.
@@ -22,6 +23,10 @@ contract ValidationFacet {
     uint8 internal constant MODE_EOA = 0x00;
     uint8 internal constant MODE_PASSKEY_SESSION = 0x01;
     uint8 internal constant MODE_OAUTH_SESSION = 0x02;
+
+    // For transfer-only detection (MVP)
+    bytes4 internal constant EXECUTE_SELECTOR = bytes4(keccak256("execute(address,uint256,bytes)"));
+    bytes4 internal constant ERC20_TRANSFER_SELECTOR = 0xa9059cbb;
 
     error InvalidSigMode();
     error SessionExpired();
@@ -53,15 +58,50 @@ contract ValidationFacet {
         uint8 mode = uint8(sig[0]);
 
         if (mode == MODE_EOA) {
-            if (!_validateOwnerEOA(sig[1:], userOpHash)) {
-                return SIG_VALIDATION_FAILED;
+            // v1: signature = 0x00 || userSig
+            // v2: signature = 0x00 || abi.encode(userSig, attestation, oracleSig)
+            bytes memory ownerPayload = sig[1:];
+
+            bool isV2 = ownerPayload.length > 80; // v1 usually ~65 bytes; v2 abi.encode is longer
+
+            if (!isV2) {
+                if (!_validateOwnerEOA(ownerPayload, userOpHash)) {
+                    return SIG_VALIDATION_FAILED;
+                }
+            } else {
+                (bytes memory userSig, LibRiskOracle.RiskAttestation memory att, bytes memory oracleSig) =
+                    abi.decode(ownerPayload, (bytes, LibRiskOracle.RiskAttestation, bytes));
+
+                if (!_validateOwnerEOA(userSig, userOpHash)) {
+                    return SIG_VALIDATION_FAILED;
+                }
+
+                // transfer-only risk enforcement
+                if (_isTransferUserOp(userOp.callData)) {
+                    // bind attestation to this op
+                    if (att.userOpHash != userOpHash) {
+                        return SIG_VALIDATION_FAILED;
+                    }
+
+                    // call RiskOracleFacet via diamond routing (internal self-call)
+                    (bool ok, ) = address(this).staticcall(
+                        abi.encodeWithSignature(
+                            "checkRisk((bytes32,uint16,uint48),bytes)",
+                            att,
+                            oracleSig
+                        )
+                    );
+                    if (!ok) {
+                        return SIG_VALIDATION_FAILED;
+                    }
+                }
             }
-        
+
             // DAO/AI auth context: write validated memberId (no re-auth)
             bytes32 memberId = keccak256(abi.encodePacked("EOA", LibDiamond.owner()));
             LibIdentity.setCurrentMemberId(memberId);
 
-} else if (mode == MODE_PASSKEY_SESSION) {
+        } else if (mode == MODE_PASSKEY_SESSION) {
             if (!_validatePasskeySession(sig[1:], userOpHash)) {
                 return SIG_VALIDATION_FAILED;
             }
@@ -90,7 +130,7 @@ contract ValidationFacet {
     // ------------------------------------------------------------
     // Mode 0x00: owner EOA signature (EIP-712 userOpHash, fallback EIP-191)
     // ------------------------------------------------------------
-    function _validateOwnerEOA(bytes calldata ownerSig, bytes32 userOpHash) internal view returns (bool) {
+    function _validateOwnerEOA(bytes memory ownerSig, bytes32 userOpHash) internal view returns (bool) {
         address owner = LibDiamond.owner();
 
         // (a) EIP-712: signature over userOpHash directly
@@ -121,23 +161,26 @@ contract ValidationFacet {
         // Passkey must be registered/enabled (MVP gate)
         if (!LibIdentity.isPasskeyEnabled(credentialIdHash)) revert PasskeyNotEnabled();
 
-        
-if (!_validateIssuerSessionAuth(
-            MODE_PASSKEY_SESSION,
-            userOpHash,
-            sessionSigner,
-            validUntil,
-            scope,
-            sessionNonce,
-            issuerSig
-        )) { return false; }
+        if (
+            !_validateIssuerSessionAuth(
+                MODE_PASSKEY_SESSION,
+                userOpHash,
+                sessionSigner,
+                validUntil,
+                scope,
+                sessionNonce,
+                issuerSig
+            )
+        ) {
+            return false;
+        }
+
         // DAO/AI auth context: write validated memberId (no re-auth)
         address issuer = LibIdentity.getTrustedIssuer();
         bytes32 memberId = keccak256(abi.encodePacked("PASSKEY", issuer, sessionSigner));
         LibIdentity.setCurrentMemberId(memberId);
 
         return true;
-
     }
 
     // ------------------------------------------------------------
@@ -154,23 +197,26 @@ if (!_validateIssuerSessionAuth(
             bytes memory issuerSig
         ) = abi.decode(payload, (address, uint48, uint32, uint64, bytes));
 
-        
-if (!_validateIssuerSessionAuth(
-            MODE_OAUTH_SESSION,
-            userOpHash,
-            sessionSigner,
-            validUntil,
-            scope,
-            sessionNonce,
-            issuerSig
-        )) { return false; }
+        if (
+            !_validateIssuerSessionAuth(
+                MODE_OAUTH_SESSION,
+                userOpHash,
+                sessionSigner,
+                validUntil,
+                scope,
+                sessionNonce,
+                issuerSig
+            )
+        ) {
+            return false;
+        }
+
         // DAO/AI auth context: write validated memberId (no re-auth)
         address issuer = LibIdentity.getTrustedIssuer();
         bytes32 memberId = keccak256(abi.encodePacked("OAUTH", issuer, sessionSigner));
         LibIdentity.setCurrentMemberId(memberId);
 
         return true;
-
     }
 
     // ------------------------------------------------------------
@@ -204,7 +250,8 @@ if (!_validateIssuerSessionAuth(
         bytes memory issuerSig
     ) internal returns (bool ok) {
         ok = false;
-address issuer = LibIdentity.getTrustedIssuer();
+
+        address issuer = LibIdentity.getTrustedIssuer();
         if (issuer == address(0)) revert IssuerNotSet();
 
         // check session exists
@@ -215,15 +262,14 @@ address issuer = LibIdentity.getTrustedIssuer();
         uint48 effectiveUntil = s.validUntil < validUntil ? s.validUntil : validUntil;
         if (effectiveUntil != 0 && block.timestamp > effectiveUntil) revert SessionExpired();
 
-        // anti-replay nonce
-        // require strictly increment by 1 (you can relax later)
+        // anti-replay nonce (strict increment by 1)
         if (sessionNonce != s.nonce + 1) revert SessionNonceMismatch();
 
-        // scope: MVP just store; you can add gates later (e.g., only allow DaoFacet selectors)
-        // For now, require payload scope is subset of stored scope unless stored scope==0 (meaning "all")
+        // scope: require payload scope is subset of stored scope unless stored scope==0 ("all")
         if (s.scope != 0) {
-            // subset check: (payload & ~stored) == 0
-            if ((scope & ~s.scope) != 0) { return false; }
+            if ((scope & ~s.scope) != 0) {
+                return false;
+            }
         }
 
         // verify issuer signature
@@ -242,11 +288,47 @@ address issuer = LibIdentity.getTrustedIssuer();
 
         bytes32 digest = LibValidation.toEthSignedMessageHash(msgHash);
         address recovered = LibValidation.recoverSigner(digest, issuerSig);
-        if (recovered != issuer) { return false; }
+        if (recovered != issuer) {
+            return false;
+        }
 
         // bump session nonce in storage on success
         LibIdentity.bumpSessionNonce(sessionSigner, sessionNonce);
         ok = true;
         return ok;
-}
+    }
+
+    // ------------------------------------------------------------
+    // Transfer-only detection (MVP)
+    // Recognize:
+    // - ETH transfer via execute(target, value>0, data="")
+    // - ERC20 transfer via execute(token, 0, abi.encodeWithSelector(0xa9059cbb,...))
+    // ------------------------------------------------------------
+    function _isTransferUserOp(bytes calldata callData) internal pure returns (bool) {
+        if (callData.length < 4) return false;
+
+        bytes4 sel;
+        assembly {
+            sel := calldataload(callData.offset)
+        }
+        if (sel != EXECUTE_SELECTOR) return false;
+
+        (address target, uint256 value, bytes memory data) =
+            abi.decode(callData[4:], (address, uint256, bytes));
+
+        // avoid unused warning in some configs
+        target;
+
+        if (value > 0 && data.length == 0) return true;
+
+        if (value == 0 && data.length >= 4) {
+            bytes4 inner;
+            assembly {
+                inner := mload(add(data, 32))
+            }
+            if (inner == ERC20_TRANSFER_SELECTOR) return true;
+        }
+
+        return false;
+    }
 }

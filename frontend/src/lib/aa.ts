@@ -250,3 +250,30 @@ export async function sendUserOp(params: {
 
   return { receipt, success, revertReason }
 }
+export type RiskAttestation = {
+  userOpHash: string
+  riskScoreBps: number
+  deadline: number
+}
+
+export async function signUserOpEOA_v2(params: {
+  provider: ethers.providers.Web3Provider
+  userOpHash: string
+  attestation: RiskAttestation
+  oracleSig: string
+}) {
+  const { provider, userOpHash, attestation, oracleSig } = params
+  const signer = provider.getSigner()
+
+  // userSig is still signed by the user (EOA)
+  const userSig = await signer.signMessage(ethers.utils.arrayify(userOpHash))
+
+  // payload = abi.encode(userSig, (userOpHash, riskScoreBps, deadline), oracleSig)
+  const payload = ethers.utils.defaultAbiCoder.encode(
+    ['bytes', 'tuple(bytes32 userOpHash,uint16 riskScoreBps,uint48 deadline)', 'bytes'],
+    [userSig, [attestation.userOpHash, attestation.riskScoreBps, attestation.deadline], oracleSig]
+  )
+
+  // mode 0x00 + encoded payload
+  return ethers.utils.hexConcat(['0x00', payload])
+}

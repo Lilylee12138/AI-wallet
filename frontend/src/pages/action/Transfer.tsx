@@ -5,7 +5,7 @@ import { useNavigate } from 'react-router-dom'
 
 import { getInjectedProvider, requestAccounts, getChainId } from '../../lib/eth'
 import { loadDeployments } from '../../config/deployments'
-import { buildUserOp, signUserOpEOA, sendUserOp } from '../../lib/aa'
+import { buildUserOp, sendUserOp, signUserOpEOA_v2 } from '../../lib/aa'
 
 const EXEC_ABI = ['function execute(address target,uint256 value,bytes data) returns (bytes)']
 
@@ -15,6 +15,8 @@ export default function ActionTransfer() {
   const [dep, setDep] = useState<any>(null)
   const [to, setTo] = useState('')
   const [amt, setAmt] = useState('0.001')
+
+  const [riskScore, setRiskScore] = useState<number | null>(null)
 
   const [sending, setSending] = useState(false)
   const [txMsg, setTxMsg] = useState('')
@@ -39,9 +41,21 @@ export default function ActionTransfer() {
     })()
   }, [])
 
+  async function fetchRisk(params: { diamond: string; userOpHash: string; riskScoreBps: number }) {
+    const r = await fetch('http://localhost:8787/risk', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(params)
+    })
+    const j = await r.json()
+    if (!r.ok) throw new Error(j?.error || 'risk engine error')
+    return j as { attestation: { userOpHash: string; riskScoreBps: number; deadline: number }; oracleSig: string }
+  }
+
   async function send() {
     setTxMsg('')
     setTxErr('')
+    setRiskScore(null)
     setSending(true)
     try {
       const { p, d } = await loadDep()
@@ -56,13 +70,6 @@ export default function ActionTransfer() {
       if (!accounts.length) throw new Error('MetaMask not connected')
       const beneficiary = accounts[0]
 
-      //debug logs
-      console.log('[debug] amt input =', amt)
-      console.log('[debug] value(wei) =', value.toString())
-      console.log('[debug] value(eth) =', ethers.utils.formatEther(value))
-
-
-      // calldata = DiamondAccount(delegatecall) -> ExecutionFacet.execute(recipient, value, 0x)
       const execIface = new ethers.utils.Interface(EXEC_ABI)
       const callData = execIface.encodeFunctionData('execute', [recipient, value, '0x'])
 
@@ -70,24 +77,54 @@ export default function ActionTransfer() {
         provider: p,
         entryPoint: d.entryPoint,
         diamond: d.diamondAccount,
-        callData,
+        callData
       })
 
-      userOp.signature = await signUserOpEOA({ provider: p, userOpHash })
+      // MVP: pick a risk score locally (later: XGBoost)
+      // Change this to 9000 to see the chain reject (AA24)
+      // const desiredScore = 1200 // good score, should pass
+      // const desiredScore = 9000 // high risk, should be rejected by chain (AA24 signature error)
+
+      // 模拟黑名单
+      const highRiskSet = new Set([
+        '0x4948b4fcba712e5d90cc6b8448a0e1688c000000'.toLowerCase()
+      ])
+
+      const desiredScore = highRiskSet.has(recipient.toLowerCase()) ? 9500 : 1200
+
+      
+      const risk = await fetchRisk({
+        diamond: d.diamondAccount,
+        userOpHash,
+        riskScoreBps: desiredScore
+      })
+
+      setRiskScore(risk.attestation.riskScoreBps)
+
+      userOp.signature = await signUserOpEOA_v2({
+        provider: p,
+        userOpHash,
+        attestation: risk.attestation,
+        oracleSig: risk.oracleSig
+      })
 
       const receipt = await sendUserOp({
         provider: p,
         entryPoint: d.entryPoint,
         beneficiary,
-        userOp,
+        userOp
       })
-      console.log('[debug] receipt =', receipt)//debug
-      
+
       setTxMsg(`Sent successfully. tx=${receipt.transactionHash}`)
     } catch (e: any) {
-      // 尽量把错误变成人话
       const msg = e?.shortMessage || e?.reason || e?.message || String(e)
-      setTxErr(msg)
+
+      // friendly mapping for risk rejection
+      if (String(msg).includes('AA24')) {
+        setTxErr('Rejected by RiskOracle: risk score too high (AA24 signature error)')
+      } else {
+        setTxErr(msg)
+      }
     } finally {
       setSending(false)
     }
@@ -108,16 +145,17 @@ export default function ActionTransfer() {
             value={to}
             onChange={(e) => setTo(e.target.value)}
           />
-          <input
-            className='input'
-            placeholder='Amount (ETH)'
-            value={amt}
-            onChange={(e) => setAmt(e.target.value)}
-          />
+          <input className='input' placeholder='Amount (ETH)' value={amt} onChange={(e) => setAmt(e.target.value)} />
 
           <button className='btn btnPrimary' disabled={sending || !dep} onClick={send}>
             {sending ? 'Sending…' : 'Send (AA UserOp)'}
           </button>
+
+          {riskScore !== null && (
+            <div className='small' style={{ marginTop: 10, opacity: 0.9 }}>
+              Risk score (bps): {riskScore}
+            </div>
+          )}
 
           {txMsg && <div style={{ marginTop: 10, color: 'var(--green)' }}>{txMsg}</div>}
           {txErr && <div style={{ marginTop: 10, color: 'rgba(255,77,90,.9)' }}>{txErr}</div>}
