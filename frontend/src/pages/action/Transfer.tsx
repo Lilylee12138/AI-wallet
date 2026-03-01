@@ -17,6 +17,7 @@ export default function ActionTransfer() {
   const [amt, setAmt] = useState('0.001')
 
   const [riskScore, setRiskScore] = useState<number | null>(null)
+  const [riskReason, setRiskReason] = useState<string>('')
 
   const [sending, setSending] = useState(false)
   const [txMsg, setTxMsg] = useState('')
@@ -41,22 +42,28 @@ export default function ActionTransfer() {
     })()
   }, [])
 
-  async function fetchRisk(params: { diamond: string; userOpHash: string; riskScoreBps: number }) {
+  async function fetchRisk(params: { diamond: string; userOpHash: string; to: string; valueEth: number }) {
     const r = await fetch('http://localhost:8787/risk', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(params)
     })
     const j = await r.json()
-    if (!r.ok) throw new Error(j?.error || 'risk engine error')
-    return j as { attestation: { userOpHash: string; riskScoreBps: number; deadline: number }; oracleSig: string }
+    if (!r.ok) throw new Error(j?.detail || j?.error || 'risk engine error')
+    return j as {
+      attestation: { userOpHash: string; riskScoreBps: number; deadline: number }
+      oracleSig: string
+      reason: string
+    }
   }
 
   async function send() {
     setTxMsg('')
     setTxErr('')
     setRiskScore(null)
+    setRiskReason('')
     setSending(true)
+
     try {
       const { p, d } = await loadDep()
 
@@ -80,26 +87,16 @@ export default function ActionTransfer() {
         callData
       })
 
-      // MVP: pick a risk score locally (later: XGBoost)
-      // Change this to 9000 to see the chain reject (AA24)
-      // const desiredScore = 1200 // good score, should pass
-      // const desiredScore = 9000 // high risk, should be rejected by chain (AA24 signature error)
-
-      // 模拟黑名单
-      const highRiskSet = new Set([
-        '0x4948b4fcba712e5d90cc6b8448a0e1688c000000'.toLowerCase()
-      ])
-
-      const desiredScore = highRiskSet.has(recipient.toLowerCase()) ? 9500 : 1200
-
-      
+      // Step1: server decides riskScoreBps (client does NOT send riskScoreBps)
       const risk = await fetchRisk({
         diamond: d.diamondAccount,
         userOpHash,
-        riskScoreBps: desiredScore
+        to: recipient,
+        valueEth: Number(amt || '0')
       })
 
       setRiskScore(risk.attestation.riskScoreBps)
+      setRiskReason(risk.reason || '')
 
       userOp.signature = await signUserOpEOA_v2({
         provider: p,
@@ -115,11 +112,9 @@ export default function ActionTransfer() {
         userOp
       })
 
-      setTxMsg(`Sent successfully. tx=${receipt.transactionHash}`)
+      setTxMsg(`Sent successfully. tx=${(receipt as any)?.transactionHash || ''}`)
     } catch (e: any) {
       const msg = e?.shortMessage || e?.reason || e?.message || String(e)
-
-      // friendly mapping for risk rejection
       if (String(msg).includes('AA24')) {
         setTxErr('Rejected by RiskOracle: risk score too high (AA24 signature error)')
       } else {
@@ -154,6 +149,11 @@ export default function ActionTransfer() {
           {riskScore !== null && (
             <div className='small' style={{ marginTop: 10, opacity: 0.9 }}>
               Risk score (bps): {riskScore}
+            </div>
+          )}
+          {riskReason && (
+            <div className='small' style={{ marginTop: 6, opacity: 0.75 }}>
+              Reason: {riskReason}
             </div>
           )}
 
