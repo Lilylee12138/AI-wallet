@@ -18,3 +18,18 @@ artifacts
 .DS_Store
 /contracts/dist/
 /contracts/types/
+
+
+# Virtual env
+.venv/
+venv/
+
+# Python cache
+__pycache__/
+*.pyc
+
+# Mac
+.DS_Store
+
+# VSCode
+.vscode/
