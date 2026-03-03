@@ -32,4 +32,4 @@ __pycache__/
 .DS_Store
 
 # VSCode
-.vscode/
+.vscode/ai-risk/api/.env

@@ -8,7 +8,9 @@ from eth_account import Account
 from eth_account.messages import encode_defunct
 from eth_utils import keccak, to_bytes, to_canonical_address, is_address
 
-app = FastAPI(title='AI Wallet Risk Engine (Step1: server-side scoring)', version='0.2.0')
+from xgb_engine import predict_prob
+
+app = FastAPI(title='AI Wallet Risk Engine (Step2-1: XGBoost scoring)', version='0.3.0')
 
 app.add_middleware(
   CORSMiddleware,
@@ -33,6 +35,7 @@ class RiskResponse(BaseModel):
   attestation: Attestation
   oracleSig: str
   reason: str
+  riskProb: float
 
 def _u256_32(x: int) -> bytes:
   return x.to_bytes(32, byteorder='big', signed=False)
@@ -53,25 +56,23 @@ def build_msg_hash(chain_id: int, diamond: str, user_op_hash: str, risk_score_bp
   packed = prefix + chain_id_32 + wallet_20 + op_hash_32 + score_2 + deadline_6
   return keccak(packed)
 
-def score_rule_based(to_addr: str, value_eth: float) -> Tuple[int, str]:
-  high_risk_addrs = set(
-    a.strip().lower()
-    for a in os.environ.get('HIGH_RISK_ADDRS', '').split(',')
-    if a.strip()
-  )
+def blacklist_hit(to_addr: str) -> int:
+  s = os.environ.get('HIGH_RISK_ADDRS', '')
+  if not s:
+    return 0
+  bad = set(a.strip().lower() for a in s.split(',') if a.strip())
+  return 1 if to_addr.lower() in bad else 0
 
-  to_l = to_addr.lower()
-
-  if to_l in high_risk_addrs:
-    return 9500, 'to address is in HIGH_RISK_ADDRS'
-
+def make_reason(prob: float, bl: int, value_eth: float) -> str:
+  if bl == 1:
+    return 'blacklist_hit=1'
+  if prob >= 0.8:
+    return 'xgboost: high risk probability'
+  if prob >= 0.5:
+    return 'xgboost: medium risk probability'
   if value_eth >= 1.0:
-    return 7000, 'large value transfer (>= 1 ETH)'
-
-  if value_eth >= 0.1:
-    return 4000, 'medium value transfer (>= 0.1 ETH)'
-
-  return 1200, 'default low risk (rule-based)'
+    return 'large value (model-based)'
+  return 'xgboost: low risk probability'
 
 @app.post('/risk', response_model=RiskResponse)
 def risk(req: RiskRequest):
@@ -91,10 +92,23 @@ def risk(req: RiskRequest):
   if not is_address(req.to):
     raise HTTPException(status_code=400, detail='bad to address')
 
-  risk_score_bps, reason = score_rule_based(req.to, float(req.valueEth))
+  bl = blacklist_hit(req.to)
+
+  feats = {
+    'value_eth': float(req.valueEth),
+    'is_new_recipient': 1.0,
+    'interaction_count': 0.0,
+    'gas_gwei': 20.0,
+    'blacklist_hit': float(bl),
+    'repeat_tx': 0.0
+  }
+
+  prob = predict_prob(feats)
+  score_bps = int(max(0.0, min(1.0, prob)) * 10000.0)
+  reason = make_reason(prob, bl, float(req.valueEth))
 
   deadline = int(time.time()) + 600
-  msg_hash = build_msg_hash(chain_id, req.diamond, req.userOpHash, risk_score_bps, deadline)
+  msg_hash = build_msg_hash(chain_id, req.diamond, req.userOpHash, score_bps, deadline)
 
   acct = Account.from_key(oracle_pk)
   sig = acct.sign_message(encode_defunct(msg_hash)).signature.hex()
@@ -102,9 +116,10 @@ def risk(req: RiskRequest):
   return {
     'attestation': {
       'userOpHash': req.userOpHash,
-      'riskScoreBps': risk_score_bps,
+      'riskScoreBps': score_bps,
       'deadline': deadline
     },
     'oracleSig': '0x' + sig,
-    'reason': reason
+    'reason': reason,
+    'riskProb': prob
   }
