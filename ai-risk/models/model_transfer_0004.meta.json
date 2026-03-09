@@ -1,0 +1,21 @@
+{
+  "model": "xgboost",
+  "version": "transfer_0004",
+  "dataset": "data/transfer_v4.csv",
+  "features": [
+    "value_eth",
+    "is_new_recipient",
+    "interaction_count",
+    "gas_gwei",
+    "blacklist_hit",
+    "repeat_tx"
+  ],
+  "label": "label",
+  "threshold_default": 0.5,
+  "train_rows": 22320,
+  "test_rows": 5580,
+  "train_neg": 15120,
+  "train_pos": 7200,
+  "scale_pos_weight": 2.1,
+  "notes": "v4 retrained on scenario-driven dataset. Dataset combines real normal transactions, synthetic normal scenarios, borderline normal cases, malicious scenarios, and selected hard malicious samples."
+}

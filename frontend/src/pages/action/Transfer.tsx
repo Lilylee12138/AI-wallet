@@ -42,7 +42,7 @@ export default function ActionTransfer() {
     })()
   }, [])
 
-  async function fetchRisk(params: { diamond: string; userOpHash: string; to: string; valueEth: number }) {
+  async function fetchRisk(params: { diamond: string; userOpHash: string; to: string; valueEth: number; gasGwei?: number; maxFeeGwei?: number; maxPriorityFeeGwei?: number }) {
     const r = await fetch('http://localhost:8787/risk', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -88,11 +88,24 @@ export default function ActionTransfer() {
       })
 
       // Step1: server decides riskScoreBps (client does NOT send riskScoreBps)
+      const fee = await p.getFeeData()
+      const maxFee = fee.maxFeePerGas ?? fee.gasPrice
+      const maxPrio = fee.maxPriorityFeePerGas ?? null
+
+      const maxFeeGwei = maxFee ? Number(ethers.utils.formatUnits(maxFee, 'gwei')) : undefined
+      const maxPriorityFeeGwei = maxPrio ? Number(ethers.utils.formatUnits(maxPrio, 'gwei')) : undefined
+
+      // Model feature gas_gwei: use maxFeePerGas (fallback gasPrice)
+      const gasGwei = maxFeeGwei
+
       const risk = await fetchRisk({
         diamond: d.diamondAccount,
         userOpHash,
         to: recipient,
-        valueEth: Number(amt || '0')
+        valueEth: Number(amt || '0'),
+        gasGwei,
+        maxFeeGwei,
+        maxPriorityFeeGwei
       })
 
       setRiskScore(risk.attestation.riskScoreBps)

@@ -1,0 +1,21 @@
+{
+  "model": "xgboost",
+  "version": "transfer_0005",
+  "dataset": "data/transfer_v4.csv",
+  "features": [
+    "value_eth",
+    "is_new_recipient",
+    "interaction_count",
+    "gas_gwei",
+    "blacklist_hit",
+    "repeat_tx"
+  ],
+  "label": "label",
+  "threshold_default": 0.5,
+  "train_rows": 22320,
+  "test_rows": 5580,
+  "train_neg": 15120,
+  "train_pos": 7200,
+  "scale_pos_weight": 2.1,
+  "notes": "v5 retrained on transfer_v4 dataset with monotonic constraints. Constraints enforce paper-aligned risk direction on all six features (value_eth+, is_new_recipient+, interaction_count-, gas_gwei+, blacklist_hit+, repeat_tx+)."
+}

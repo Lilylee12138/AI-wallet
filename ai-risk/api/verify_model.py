@@ -12,7 +12,7 @@ FEATURES = [
 ]
 
 def main():
-  model_path = os.environ.get('MODEL_PATH', 'ai-risk/models/model_transfer_0003.json')
+  model_path = os.environ.get('MODEL_PATH', 'ai-risk/models/model_transfer_0004.json')
   print('[verify] MODEL_PATH =', model_path)
 
   clf = xgb.XGBClassifier()
