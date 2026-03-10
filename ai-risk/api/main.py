@@ -4,6 +4,9 @@ import random
 import json
 from typing import Optional
 
+import subprocess
+from pathlib import Path
+
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
@@ -87,6 +90,16 @@ class RiskResponse(BaseModel):
     attestation: Attestation
     oracleSig: str
 
+class SwapQuoteRequest(BaseModel):
+    tokenIn: str
+    tokenOut: str
+    amountIn: float = Field(..., gt=0)
+
+
+class SwapQuoteResponse(BaseModel):
+    input: dict
+    routes: list
+    bestRoute: dict
 
 def build_attestation_hash(wallet: str, user_op_hash: str, risk_score_bps: int, deadline: int) -> bytes:
     # Must match LibRiskOracle.attestationMessageHash exactly:
@@ -253,3 +266,75 @@ def risk(req: RiskRequest):
         ),
         oracleSig=oracle_sig,
     )
+
+@app.post("/swap/quote", response_model=SwapQuoteResponse)
+def swap_quote(req: SwapQuoteRequest):
+    repo_root = Path(__file__).resolve().parents[2]
+    script_path = repo_root / "scripts" / "quote_engine_api.ts"
+
+    if not script_path.exists():
+        raise HTTPException(status_code=500, detail=f"quote script not found: {script_path}")
+
+    env = os.environ.copy()
+    env["TOKEN_IN"] = req.tokenIn.upper()
+    env["TOKEN_OUT"] = req.tokenOut.upper()
+    env["AMOUNT_IN"] = str(req.amountIn)
+
+    try:
+        result = subprocess.run(
+            [
+                "npx",
+                "hardhat",
+                "run",
+                str(script_path),
+                "--network",
+                "localhost",
+            ],
+            cwd=str(repo_root),
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+    except subprocess.TimeoutExpired:
+        raise HTTPException(status_code=504, detail="quote engine timeout")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"failed to run quote engine: {e}")
+
+    if result.returncode != 0:
+        raise HTTPException(
+            status_code=500,
+            detail={
+                "message": "quote engine failed",
+                "stdout": result.stdout,
+                "stderr": result.stderr,
+            },
+        )
+
+    stdout = (result.stdout or "").strip()
+    if not stdout:
+        raise HTTPException(status_code=500, detail="quote engine returned empty stdout")
+
+    lines = [line.strip() for line in stdout.splitlines() if line.strip()]
+    json_line = lines[-1]
+
+    try:
+        data = json.loads(json_line)
+    except Exception:
+        raise HTTPException(
+            status_code=500,
+            detail={
+                "message": "failed to parse quote engine json",
+                "stdout": result.stdout,
+                "stderr": result.stderr,
+            },
+        )
+
+    return SwapQuoteResponse(
+        input=data["input"],
+        routes=data["routes"],
+        bestRoute=data["bestRoute"],
+    )
+
+
+

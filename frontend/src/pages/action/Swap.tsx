@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import { ethers } from 'ethers'
 import Layout from '../../components/Layout'
 import { useNavigate } from 'react-router-dom'
@@ -7,20 +7,93 @@ import { getInjectedProvider, requestAccounts, getChainId } from '../../lib/eth'
 import { loadDeployments } from '../../config/deployments'
 import { buildUserOp, signUserOpEOA, sendUserOp } from '../../lib/aa'
 
-const EXEC_ABI = ['function execute(address target,uint256 value,bytes data) returns (bytes)']
+const API_BASE = 'http://127.0.0.1:8787'
 
-// Mock router interface (你会在下一步部署它)
-const MOCK_ROUTER_ABI = [
-  'function swapEthToMockUsdt(address to) payable returns (uint256 outAmount)'
+const EXEC_ABI = [
+  'function execute(address target,uint256 value,bytes data)'
 ]
+
+const ROUTER_ABI = [
+  'function swapExactETHForTokens(uint256 amountOutMin,address[] calldata path,address to,uint256 deadline) payable returns (uint256[] memory amounts)'
+]
+
+type TokenSymbol = 'ETH' | 'GOV' | 'USD'
+
+type SwapQuoteResponse = {
+  input: {
+    tokenIn: string
+    tokenOut: string
+    amountIn: number
+  }
+  routes: Array<{
+    name: string
+    path: string[]
+    amountIn: string
+    amountOut: string
+    amountOutRaw: string
+    effectiveRate: string
+    priceImpactPct: string
+    estimatedGas: number
+    gasCostEth: string
+    gasCostUsdApprox: string
+    recommendedSlippagePct: string
+    minimumReceived: string
+    aiExplanation: string
+    compositeScore: number
+  }>
+  bestRoute: {
+    name: string
+    path: string[]
+    amountIn: string
+    expectedOut: string
+    amountOutRaw: string
+    effectiveRate: string
+    priceImpact: string
+    estimatedGas: number
+    gasCostEth: string
+    gasCostUsdApprox: string
+    recommendedSlippage: string
+    minimumReceived: string
+    aiExplanation: string
+  }
+}
+
+function routeNameToRouter(dep: any, routeName: string) {
+  if (routeName.includes('DEX2')) return dep.dex.DEX2Router
+  return dep.dex.DEX1Router
+}
+
+function symbolToAddress(sym: string, dep: any) {
+  if (sym === 'ETH') return dep.tokens.WETH
+  return dep.tokens[sym]
+}
+
+function pctStringToBps(s: string) {
+  const n = Number(String(s).replace('%', '').trim())
+  if (!Number.isFinite(n) || n < 0) return 0
+  return Math.floor(n * 100)
+}
+
+function presetToDisplay(v: string) {
+  if (v === 'auto') return 'Auto'
+  return `${v}%`
+}
 
 export default function ActionSwap() {
   const nav = useNavigate()
 
   const [dep, setDep] = useState<any>(null)
 
-  const [amountEth, setAmountEth] = useState('0.001')
-  const [routerAddr, setRouterAddr] = useState('')
+  const [tokenIn, setTokenIn] = useState<TokenSymbol>('ETH')
+  const [tokenOut, setTokenOut] = useState<TokenSymbol>('GOV')
+  const [amountIn, setAmountIn] = useState('0.1')
+
+  const [slippageMode, setSlippageMode] = useState<'auto' | '0.5' | '2' | 'custom'>('auto')
+  const [customSlippage, setCustomSlippage] = useState('1.0')
+
+  const [quote, setQuote] = useState<SwapQuoteResponse | null>(null)
+  const [quoteLoading, setQuoteLoading] = useState(false)
+  const [quoteErr, setQuoteErr] = useState('')
 
   const [sending, setSending] = useState(false)
   const [txMsg, setTxMsg] = useState('')
@@ -32,8 +105,6 @@ export default function ActionSwap() {
     const chainId = await getChainId(p)
     const d = await loadDeployments(chainId)
     setDep(d)
-    // 兼容：如果你 deployments 里有 mockSwapRouter 字段，就自动填充
-    if (!routerAddr && (d as any).mockSwapRouter) setRouterAddr((d as any).mockSwapRouter)
     return { p, d }
   }
 
@@ -47,33 +118,135 @@ export default function ActionSwap() {
     })()
   }, [])
 
+  useEffect(() => {
+    let alive = true
+
+    ;(async () => {
+      try {
+        setQuoteErr('')
+        setTxMsg('')
+        setTxErr('')
+
+        const n = Number(amountIn)
+        if (!Number.isFinite(n) || n <= 0) {
+          setQuote(null)
+          return
+        }
+
+        if (tokenIn === tokenOut) {
+          setQuote(null)
+          setQuoteErr('From token and To token cannot be the same.')
+          return
+        }
+
+        setQuoteLoading(true)
+
+        const res = await fetch(`${API_BASE}/swap/quote`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            tokenIn,
+            tokenOut,
+            amountIn: n,
+          }),
+        })
+
+        if (!res.ok) {
+          const text = await res.text()
+          throw new Error(text || `HTTP ${res.status}`)
+        }
+
+        const data: SwapQuoteResponse = await res.json()
+        if (!alive) return
+        setQuote(data)
+      } catch (e: any) {
+        if (!alive) return
+        setQuote(null)
+        setQuoteErr(e?.message || String(e))
+      } finally {
+        if (!alive) return
+        setQuoteLoading(false)
+      }
+    })()
+
+    return () => {
+      alive = false
+    }
+  }, [tokenIn, tokenOut, amountIn])
+
+  const isExecutable = useMemo(() => {
+    return tokenIn === 'ETH' && (tokenOut === 'GOV' || tokenOut === 'USD')
+  }, [tokenIn, tokenOut])
+
+  const effectiveSlippagePct = useMemo(() => {
+    if (!quote?.bestRoute) return 0
+    if (slippageMode === 'auto') {
+      return Number(String(quote.bestRoute.recommendedSlippage).replace('%', '').trim())
+    }
+    if (slippageMode === 'custom') {
+      const v = Number(customSlippage)
+      return Number.isFinite(v) && v > 0 ? v : 1
+    }
+    return Number(slippageMode)
+  }, [slippageMode, customSlippage, quote])
+
+  const displayMinReceived = useMemo(() => {
+    if (!quote?.bestRoute) return 'N/A'
+
+    const expected = quote.bestRoute.expectedOut
+    const parts = expected.split(' ')
+    const amount = Number(parts[0])
+    const symbol = parts[1] || tokenOut
+
+    if (!Number.isFinite(amount)) return quote.bestRoute.minimumReceived
+
+    const min = amount * (1 - effectiveSlippagePct / 100)
+    return `${min.toFixed(4)} ${symbol}`
+  }, [quote, effectiveSlippagePct, tokenOut])
+
   async function swap() {
     setTxMsg('')
     setTxErr('')
     setSending(true)
+
     try {
       const { p, d } = await loadDep()
 
-      if (!routerAddr) {
-        throw new Error('No router address. Please deploy MockSwapRouter and set deployments.mockSwapRouter')
+      if (!quote?.bestRoute) throw new Error('No quote available')
+      if (!isExecutable) {
+        throw new Error('Current real execution supports ETH -> GOV and ETH -> USD only')
       }
 
-      const router = ethers.utils.getAddress(routerAddr.trim())
-      const value = ethers.utils.parseEther((amountEth || '0').trim())
+      const router = routeNameToRouter(d, quote.bestRoute.name)
+      const value = ethers.utils.parseEther(amountIn)
       if (value.lte(0)) throw new Error('Amount must be > 0')
+
+      const path = quote.bestRoute.path.map((sym) => symbolToAddress(sym, d))
+
+      const expectedOutRaw = ethers.BigNumber.from(quote.bestRoute.amountOutRaw)
+      const slippageBps = Math.floor(effectiveSlippagePct * 100)
+      const amountOutMin = expectedOutRaw.mul(10000 - slippageBps).div(10000)
+
+      const deadline = Math.floor(Date.now() / 1000) + 60 * 10
+
+      const routerIface = new ethers.utils.Interface(ROUTER_ABI)
+      const innerData = routerIface.encodeFunctionData('swapExactETHForTokens', [
+        amountOutMin,
+        path,
+        d.diamondAccount,
+        deadline,
+      ])
+
+      const execIface = new ethers.utils.Interface(EXEC_ABI)
+      const callData = execIface.encodeFunctionData('execute', [
+        router,
+        value,
+        innerData,
+      ])
 
       const accounts = await p.listAccounts()
       if (!accounts.length) throw new Error('MetaMask not connected')
       const beneficiary = accounts[0]
-
-      // inner data: call router.swapEthToMockUsdt(to=diamondAccount)
-      // 这里 to 用 diamondAccount 地址，表示“换到钱包里”
-      const routerIface = new ethers.utils.Interface(MOCK_ROUTER_ABI)
-      const innerData = routerIface.encodeFunctionData('swapEthToMockUsdt', [d.diamondAccount])
-
-      // outer calldata: execute(router, value, innerData)
-      const execIface = new ethers.utils.Interface(EXEC_ABI)
-      const callData = execIface.encodeFunctionData('execute', [router, value, innerData])
 
       const { userOp, userOpHash } = await buildUserOp({
         provider: p,
@@ -82,19 +255,31 @@ export default function ActionSwap() {
         callData,
       })
 
-      userOp.signature = await signUserOpEOA({ provider: p, userOpHash })
+      userOp.signature = await signUserOpEOA({
+        provider: p,
+        userOpHash,
+      })
 
-      const receipt = await sendUserOp({
+      const result = await sendUserOp({
         provider: p,
         entryPoint: d.entryPoint,
         beneficiary,
         userOp,
+        userOpHash,
       })
 
-      setTxMsg(`Swap sent. tx=${receipt.transactionHash}`)
+      if (result?.success === false) {
+        throw new Error(result?.revertReason || 'UserOp reverted')
+      }
+
+      const txHash =
+        result?.receipt?.transactionHash ||
+        result?.receipt?.hash ||
+        'submitted'
+
+      setTxMsg(`Swap success. tx=${txHash}`)
     } catch (e: any) {
-      const msg = e?.shortMessage || e?.reason || e?.message || String(e)
-      setTxErr(msg)
+      setTxErr(e?.shortMessage || e?.reason || e?.message || String(e))
     } finally {
       setSending(false)
     }
@@ -103,38 +288,148 @@ export default function ActionSwap() {
   return (
     <Layout title='Swap'>
       <div className='card' style={{ padding: 16 }}>
-        <div className='h2'>Swap (AA)</div>
-        <div className='small' style={{ marginTop: 8 }}>
-          MVP：使用 AA 调用 ExecutionFacet.execute(router, value, data) 触发 MockSwapRouter 的 swap 事件。
+        <div className='row' style={{ justifyContent: 'space-between', alignItems: 'center' }}>
+          <div className='h2'>Swap</div>
+          <div className='small'>Slippage: {presetToDisplay(slippageMode === 'custom' ? customSlippage : slippageMode)}</div>
+        </div>
+
+        <div className='cardSoft' style={{ marginTop: 14, padding: 14 }}>
+          <div className='small'>From token</div>
+          <select
+            className='input'
+            value={tokenIn}
+            onChange={(e) => setTokenIn(e.target.value as TokenSymbol)}
+            style={{ marginTop: 8 }}
+          >
+            <option value='ETH'>ETH</option>
+            <option value='GOV'>GOV</option>
+            <option value='USD'>USD</option>
+          </select>
+
+          <div className='small' style={{ marginTop: 12 }}>To token</div>
+          <select
+            className='input'
+            value={tokenOut}
+            onChange={(e) => setTokenOut(e.target.value as TokenSymbol)}
+            style={{ marginTop: 8 }}
+          >
+            <option value='ETH'>ETH</option>
+            <option value='GOV'>GOV</option>
+            <option value='USD'>USD</option>
+          </select>
+
+          <div className='small' style={{ marginTop: 12 }}>Amount</div>
+          <input
+            className='input'
+            placeholder='0.1'
+            value={amountIn}
+            onChange={(e) => setAmountIn(e.target.value)}
+            style={{ marginTop: 8 }}
+          />
+        </div>
+
+        <div className='cardSoft' style={{ marginTop: 14, padding: 14 }}>
+          <div className='small'>Slippage tolerance</div>
+
+          <div className='row g12' style={{ marginTop: 10 }}>
+            <button
+              className='btn btnGhost'
+              onClick={() => setSlippageMode('auto')}
+            >
+              Auto
+            </button>
+
+            <button
+              className='btn btnGhost'
+              onClick={() => setSlippageMode('0.5')}
+            >
+              0.5%
+            </button>
+
+            <button
+              className='btn btnGhost'
+              onClick={() => setSlippageMode('2')}
+            >
+              2%
+            </button>
+
+            <button
+              className='btn btnGhost'
+              onClick={() => setSlippageMode('custom')}
+            >
+              Custom
+            </button>
+          </div>
+
+          {slippageMode === 'custom' && (
+            <input
+              className='input'
+              style={{ marginTop: 10 }}
+              placeholder='1.0'
+              value={customSlippage}
+              onChange={(e) => setCustomSlippage(e.target.value)}
+            />
+          )}
+        </div>
+
+        <div className='cardSoft' style={{ marginTop: 14, padding: 14 }}>
+          <div className='small'>Quote</div>
+
+          {quoteLoading ? (
+            <div className='small' style={{ marginTop: 8 }}>
+              正在分析最优路径、滑点与 gas 成本...
+            </div>
+          ) : quoteErr ? (
+            <div className='small' style={{ marginTop: 8, color: 'rgba(255,77,90,.9)' }}>
+              {quoteErr}
+            </div>
+          ) : quote?.bestRoute ? (
+            <>
+              <div className='small' style={{ marginTop: 8 }}>
+                Best route: {quote.bestRoute.path.join(' -> ')}
+              </div>
+              <div className='small'>Expected out: {quote.bestRoute.expectedOut}</div>
+              <div className='small'>Price impact: {quote.bestRoute.priceImpact}</div>
+              <div className='small'>Recommended slippage: {quote.bestRoute.recommendedSlippage}</div>
+              <div className='small'>Minimum received: {displayMinReceived}</div>
+              <div className='small'>
+                Gas cost: {quote.bestRoute.gasCostEth} / {quote.bestRoute.gasCostUsdApprox}
+              </div>
+              <div className='small' style={{ marginTop: 8 }}>
+                {quote.bestRoute.aiExplanation}
+              </div>
+            </>
+          ) : (
+            <div className='small' style={{ marginTop: 8 }}>
+              请输入有效的 token 和 amount。
+            </div>
+          )}
+        </div>
+
+        <div className='small' style={{ marginTop: 12, opacity: 0.85 }}>
+          {isExecutable
+            ? '当前组合支持真实 AA swap 执行（Router 内部会自动 wrap ETH -> WETH）。'
+            : '当前页面已支持该组合的 AI quote 展示；真实执行下一步可继续扩展 token-to-token 与 token-to-ETH。'}
         </div>
 
         <div className='col g12' style={{ marginTop: 14 }}>
-          <div className='small'>Router (MockSwapRouter address)</div>
-          <input
-            className='input'
-            placeholder='0x...'
-            value={routerAddr}
-            onChange={(e) => setRouterAddr(e.target.value)}
-          />
-
-          <div className='small'>Amount (ETH)</div>
-          <input
-            className='input'
-            placeholder='0.001'
-            value={amountEth}
-            onChange={(e) => setAmountEth(e.target.value)}
-          />
-
-          <button className='btn btnPrimary' disabled={sending || !dep} onClick={swap}>
+          <button
+            className='btn btnPrimary'
+            disabled={sending || quoteLoading || !quote?.bestRoute || !isExecutable}
+            onClick={swap}
+          >
             {sending ? 'Swapping…' : 'Swap (AA UserOp)'}
           </button>
 
-          {txMsg && <div style={{ marginTop: 10, color: 'var(--green)' }}>{txMsg}</div>}
-          {txErr && <div style={{ marginTop: 10, color: 'rgba(255,77,90,.9)' }}>{txErr}</div>}
+          {txMsg && (
+            <div style={{ marginTop: 10, color: 'var(--green)' }}>
+              {txMsg}
+            </div>
+          )}
 
-          {!((dep as any)?.mockSwapRouter) && (
-            <div className='small' style={{ marginTop: 12, opacity: 0.8 }}>
-              提示：你还没部署 MockSwapRouter（deployments 里没有 mockSwapRouter）。我下面给你一条命令，部署后会自动写入 deployments/31337.json 和 frontend/public/deployments/31337.json。
+          {txErr && (
+            <div style={{ marginTop: 10, color: 'rgba(255,77,90,.9)' }}>
+              {txErr}
             </div>
           )}
 

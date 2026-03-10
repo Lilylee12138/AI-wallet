@@ -57,7 +57,7 @@ async function main() {
   const depositFacet = await EntryPointDepositFacet.deploy()
   await depositFacet.deployed()
 
-  // NEW: RiskOracleFacet (MVP)
+  // NEW： RiskOracleFacet (MVP)
   const RiskOracleFacet = await ethers.getContractFactory('RiskOracleFacet')
   const riskOracleFacet = await RiskOracleFacet.deploy()
   await riskOracleFacet.deployed()
@@ -183,20 +183,35 @@ async function main() {
     await (await daoSeed.seedProposalAsOwner(description, target, value, data, votingPeriod, metaHash, '')).wait()
   }
 
-  // 8) Save + sync deployments
+  // 8) Save + sync deployments (merge mode, do not overwrite tokens/dex/pools)
   const chainId = (await ethers.provider.getNetwork()).chainId
-  const deployment = { chainId, entryPoint: entryPoint.address, diamondAccount: diamond.address }
+  const fileName = `${chainId}.json`
 
   const rootDeployDir = path.join(__dirname, '../deployments')
   ensureDir(rootDeployDir)
-  fs.writeFileSync(path.join(rootDeployDir, '31337.json'), JSON.stringify(deployment, null, 2))
+  const rootFile = path.join(rootDeployDir, fileName)
+
+  let deployment: any = {}
+  if (fs.existsSync(rootFile)) {
+    deployment = JSON.parse(fs.readFileSync(rootFile, 'utf8'))
+  }
+
+  // only update fields owned by deploy.ts
+  deployment.chainId = chainId
+  deployment.entryPoint = entryPoint.address
+  deployment.diamondAccount = diamond.address
+
+  fs.writeFileSync(rootFile, JSON.stringify(deployment, null, 2))
 
   const feDeployDir = path.join(__dirname, '../frontend/public/deployments')
   ensureDir(feDeployDir)
-  fs.writeFileSync(path.join(feDeployDir, '31337.json'), JSON.stringify(deployment, null, 2))
+  const feFile = path.join(feDeployDir, fileName)
 
-  console.log('Deployment saved + synced.')
-  console.log('frontend/public/deployments/31337.json updated.')
+  fs.writeFileSync(feFile, JSON.stringify(deployment, null, 2))
+
+  console.log('Deployment merged + synced.')
+  console.log('root deployment :', rootFile)
+  console.log('frontend deployment :', feFile)
 }
 
 main().catch((e) => {
