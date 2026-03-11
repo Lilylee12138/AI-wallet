@@ -2,7 +2,7 @@ import os
 import time
 import random
 import json
-from typing import Optional
+from typing import Optional, Any, Dict, List
 
 import subprocess
 from pathlib import Path
@@ -11,6 +11,7 @@ from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 from dotenv import load_dotenv
+from openai import OpenAI
 from eth_account import Account
 from eth_account.messages import encode_defunct
 from eth_abi.packed import encode_packed
@@ -19,7 +20,10 @@ from eth_utils import keccak, to_hex, to_bytes
 # from xgb_engine import predict_prob
 from xgb_engine import predict_prob, predict_with_explain
 
-load_dotenv("ai-risk/api/.env", override=True)
+#load_dotenv("ai-risk/api/.env", override=True)
+# 改成相对路径，确保在不同工作目录下都能正确加载
+ENV_PATH = Path(__file__).resolve().with_name(".env")
+load_dotenv(ENV_PATH, override=True)
 
 app = FastAPI()
 app.add_middleware(
@@ -37,6 +41,15 @@ if not ORACLE_PRIVATE_KEY:
 ORACLE = Account.from_key(ORACLE_PRIVATE_KEY)
 
 CHAIN_ID = int(os.getenv("CHAIN_ID", "31337"))
+
+# 加 OpenAI client
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+if not OPENAI_API_KEY:
+    raise RuntimeError("Missing OPENAI_API_KEY in ai-risk/api/.env")
+
+LLM_MODEL = os.getenv("OPENAI_CHAT_MODEL", "gpt-4o-mini")
+openai_client = OpenAI(api_key=OPENAI_API_KEY)
+
 
 #HIGH_RISK_ADDRS = set(
 #    a.strip().lower()
@@ -101,6 +114,23 @@ class SwapQuoteResponse(BaseModel):
     routes: list
     bestRoute: dict
 
+
+class ChatMessage(BaseModel):
+    role: str
+    content: str
+
+
+class LlmChatRequest(BaseModel):
+    message: str = Field(..., min_length=1)
+    page: str = Field(..., min_length=1)
+    context: Dict[str, Any] = Field(default_factory=dict)
+    history: List[ChatMessage] = Field(default_factory=list)
+
+
+class LlmChatResponse(BaseModel):
+    reply: str
+    model: str
+
 def build_attestation_hash(wallet: str, user_op_hash: str, risk_score_bps: int, deadline: int) -> bytes:
     # Must match LibRiskOracle.attestationMessageHash exactly:
     # keccak256(abi.encodePacked(
@@ -119,6 +149,72 @@ def build_attestation_hash(wallet: str, user_op_hash: str, risk_score_bps: int, 
     )
     return keccak(packed)
 
+# 新增 system prompt 生成函数
+def build_wallet_assistant_system_prompt(page: str, context: Dict[str, Any]) -> str:
+    return f"""
+You are an AI Smart Wallet Assistant.
+
+You help users understand and interact with a smart contract wallet built on blockchain technology.
+
+The wallet supports:
+- ERC-4337 smart accounts
+- token transfers
+- token swaps through DEX routing
+- AI-based risk analysis
+- DAO governance voting
+
+Your job is to help users understand what is happening in the wallet and guide them safely.
+
+Communication style rules:
+
+1. Always answer in **clear, friendly English**.
+2. Assume the user is **new to blockchain**.
+3. Use **simple language** and avoid technical jargon whenever possible.
+4. When technical terms are necessary (e.g., slippage, gas, price impact), briefly explain them in plain English.
+5. Keep explanations **short, calm, and reassuring**.
+6. Do not sound robotic or academic.
+7. Use examples when helpful.
+8. If something may involve risk, explain it gently and suggest what the user can do.
+
+Very important rules:
+
+- Never invent blockchain state that is not provided in the context.
+- Only rely on the information provided below.
+- If information is missing, say that the wallet does not currently provide that detail.
+
+Current page:
+{page}
+
+Wallet context:
+{json.dumps(context, indent=2)}
+
+Explain things in a way that a beginner can understand.
+""".strip()
+
+
+def call_wallet_llm(message: str, page: str, context: Dict[str, Any], history: List[ChatMessage]) -> str:
+    system_prompt = build_wallet_assistant_system_prompt(page, context)
+
+    messages = [{"role": "system", "content": system_prompt}]
+
+    for item in history[-8:]:
+        if item.role in {"user", "assistant", "system"} and item.content.strip():
+            messages.append({"role": item.role, "content": item.content})
+
+    messages.append({"role": "user", "content": message})
+
+    resp = openai_client.chat.completions.create(
+        model=LLM_MODEL,
+        messages=messages,
+        temperature=0.3,
+    )
+
+    content = resp.choices[0].message.content
+
+    if not content or not content.strip():
+        return "Sorry, I couldn't generate a response for that request."
+
+    return content.strip()
 
 @app.post("/risk", response_model=RiskResponse)
 def risk(req: RiskRequest):
@@ -336,5 +432,21 @@ def swap_quote(req: SwapQuoteRequest):
         bestRoute=data["bestRoute"],
     )
 
+
+@app.post("/llm/chat", response_model=LlmChatResponse)
+def llm_chat(req: LlmChatRequest):
+    try:
+        reply = call_wallet_llm(
+            message=req.message,
+            page=req.page,
+            context=req.context,
+            history=req.history,
+        )
+        return LlmChatResponse(
+            reply=reply,
+            model=LLM_MODEL,
+        )
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"llm chat failed: {e}")
 
 
