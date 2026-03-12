@@ -24,6 +24,25 @@ function stateLabel(s: number) {
   return 'Pending'
 }
 
+function writeDaoChatContext(rows: Row[]) {
+  sessionStorage.setItem(
+    'wallet_ai_context',
+    JSON.stringify({
+      path: '/dao',
+      page: 'dao',
+      title: 'Govern',
+      context: {
+        proposalCount: rows.length,
+        activeProposals: rows.slice(0, 8).map((r) => ({
+          id: r.id,
+          title: r.description,
+          state: stateLabel(r.state)
+        }))
+      }
+    })
+  )
+}
+
 export default function Dao() {
   const nav = useNavigate()
   const [rows, setRows] = useState<Row[]>([])
@@ -72,6 +91,10 @@ export default function Dao() {
       }
     })()
   }, [])
+
+  useEffect(() => {
+    writeDaoChatContext(rows)
+  }, [rows])
 
   return (
     <Layout title='DAO Governance'>

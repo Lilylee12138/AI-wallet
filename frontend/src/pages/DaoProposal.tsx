@@ -1,18 +1,79 @@
+import { useEffect, useMemo, useState } from 'react'
+import { useNavigate, useParams } from 'react-router-dom'
+import Layout from '../components/Layout'
 import { ethers } from 'ethers'
 import { getInjectedProvider, requestAccounts, getChainId } from '../lib/eth'
 import { loadDeployments } from '../config/deployments'
 import { buildUserOp, signUserOpEOA, sendUserOp } from '../lib/aa'
-import { getStableMemberId } from "../lib/member";
-
-import { useEffect, useMemo, useState } from 'react'
-import { useNavigate, useParams } from 'react-router-dom'
-import Layout from '../components/Layout'
-
+import { getStableMemberId } from '../lib/member'
 
 const DAO_ABI = [
   'function getProposal(uint256) view returns (tuple(address proposer,uint64 startTime,uint64 endTime,string description,address target,uint256 value,bytes data,bytes32 metaHash,string metaURI,uint256 forVotes,uint256 againstVotes,uint256 abstainVotes,bool executed,bool finalized))',
-  'function state(uint256) view returns (uint8)'
+  'function state(uint256) view returns (uint8)',
+  'function castVoteAs(uint256 proposalId, uint8 support, bytes32 voterMemberId)',
+  'function isMember(bytes32) view returns (bool)'
 ]
+
+type ProposalView = {
+  description: string
+  start: number
+  end: number
+  executed: boolean
+  finalized: boolean
+  forVotes: number
+  againstVotes: number
+  abstainVotes: number
+}
+
+function parseProposalText(raw: string) {
+  const text = (raw || '').trim()
+
+  const lines = text.split('\n')
+  const title = (lines[0] || 'Untitled Proposal').trim()
+  const body = lines.slice(1).join('\n').trim()
+
+  const knownHeaders = ['Motivation', 'Specification', 'Benefits', 'Risks', 'Timeline']
+  const sections: Array<{ heading: string; content: string }> = []
+
+  let currentHeading = 'Overview'
+  let currentContent: string[] = []
+
+  const pushSection = () => {
+    const content = currentContent.join('\n').trim()
+    if (content) {
+      sections.push({
+        heading: currentHeading,
+        content
+      })
+    }
+  }
+
+  for (const line of body.split('\n')) {
+    const trimmed = line.trim()
+
+    if (knownHeaders.includes(trimmed)) {
+      pushSection()
+      currentHeading = trimmed
+      currentContent = []
+    } else {
+      currentContent.push(line)
+    }
+  }
+
+  pushSection()
+
+  if (!sections.length && body) {
+    sections.push({
+      heading: 'Overview',
+      content: body
+    })
+  }
+
+  return {
+    title,
+    sections
+  }
+}
 
 function stateLabel(s: number) {
   if (s === 1) return 'Active'
@@ -22,305 +83,659 @@ function stateLabel(s: number) {
   return 'Pending'
 }
 
+function pct(part: number, total: number) {
+  if (!total) return 0
+  return Math.round((part / total) * 100)
+}
+
+function mapFriendlyDaoError(raw: string) {
+  const msg = String(raw || '')
+
+  if (msg.includes("AA21 didn't pay prefund")) {
+    return {
+      title: 'Not enough gas prefund',
+      message:
+        'This DAO vote could not be submitted because the smart wallet does not have enough prefund for the ERC-4337 operation. Please add more ETH to the wallet or deposit more ETH into the EntryPoint gas tank, then try again.'
+    }
+  }
+
+  if (msg.includes('AlreadyVoted')) {
+    return {
+      title: 'You already voted',
+      message:
+        'This wallet has already voted on this proposal, so the transaction was rejected.'
+    }
+  }
+
+  if (msg.includes('VotingClosed') || msg.includes('InvalidState')) {
+    return {
+      title: 'Voting is not active',
+      message:
+        'This proposal is not currently in an active voting state, so your vote cannot be submitted.'
+    }
+  }
+
+  if (msg.includes('NotMember')) {
+    return {
+      title: 'Not a DAO member',
+      message:
+        'This wallet is not recognized as a DAO member, so it cannot vote on this proposal.'
+    }
+  }
+
+  if (msg.includes('MetaMask not connected')) {
+    return {
+      title: 'Wallet not connected',
+      message:
+        'Your wallet is not connected. Please connect MetaMask first, then try again.'
+    }
+  }
+
+  if (msg.includes('user rejected') || msg.includes('User denied')) {
+    return {
+      title: 'Transaction cancelled',
+      message:
+        'The transaction was cancelled in the wallet before it was submitted.'
+    }
+  }
+
+  return {
+    title: 'Transaction failed',
+    message:
+      'The vote could not be completed. Please check your wallet balance, gas tank balance, proposal status, and DAO membership status, then try again.'
+  }
+}
+
+function shortenError(raw: string) {
+  const text = String(raw || '')
+  return text.length > 240 ? `${text.slice(0, 240)}...` : text
+}
+
 export default function DaoProposal() {
   const nav = useNavigate()
   const { id } = useParams()
-  const pid = Number(id || 0)
+  const pid = Number(id)
+  const validPid = Number.isFinite(pid) && pid > 0
 
-  const [err, setErr] = useState('')
-  const [p, setP] = useState<any>(null)
-  const [st, setSt] = useState(0)
   const [dep, setDep] = useState<any>(null)
+  const [proposal, setProposal] = useState<ProposalView | null>(null)
+  const [loading, setLoading] = useState(false)
+  const [sending, setSending] = useState(false)
+  const [msg, setMsg] = useState('')
+  const [err, setErr] = useState('')
+  const [st, setSt] = useState(0)
 
-  async function refreshProposal() {
-    const provider = getInjectedProvider()
-    await requestAccounts(provider)
-    const chainId = await getChainId(provider)
+  const [errorModalOpen, setErrorModalOpen] = useState(false)
+  const [friendlyErrorTitle, setFriendlyErrorTitle] = useState('')
+  const [friendlyErrorMessage, setFriendlyErrorMessage] = useState('')
+
+  const [aiExplaining, setAiExplaining] = useState(false)
+  const [aiReply, setAiReply] = useState('')
+  const [aiErr, setAiErr] = useState('')
+
+  const canVote = st === 1
+
+  async function loadDep() {
+    const p = getInjectedProvider()
+    await requestAccounts(p)
+    const chainId = await getChainId(p)
     const d = await loadDeployments(chainId)
     setDep(d)
+    return { p, d }
+  }
 
-    const dao = new ethers.Contract(d.diamondAccount, DAO_ABI, provider)
-    const proposal = await dao.getProposal(pid)
-    const state = await dao.state(pid)
+  function showFriendlyError(raw: string) {
+    const mapped = mapFriendlyDaoError(raw)
+    setErr(raw)
+    setFriendlyErrorTitle(mapped.title)
+    setFriendlyErrorMessage(mapped.message)
+    setErrorModalOpen(true)
+  }
 
-    setP(proposal)
-    setSt(Number(state))
+  async function refreshProposal() {
+    setLoading(true)
+    setErr('')
 
-    console.log('[refreshProposal] pid=', pid, 'diamond=', d.diamondAccount)
-    console.log(
-      '[refreshProposal] forVotes=',
-      proposal.forVotes?.toString?.() ?? String(proposal.forVotes),
-      'against=',
-      proposal.againstVotes?.toString?.() ?? String(proposal.againstVotes),
-      'abstain=',
-      proposal.abstainVotes?.toString?.() ?? String(proposal.abstainVotes)
-    )
+    try {
+      if (!validPid) {
+        throw new Error(`Invalid proposal id: ${String(id)}`)
+      }
+
+      const { p, d } = await loadDep()
+      const dao = new ethers.Contract(d.diamondAccount, DAO_ABI, p)
+
+      const pr = await dao.getProposal(pid)
+      const state = await dao.state(pid)
+
+      setProposal({
+        description: String(pr.description || ''),
+        start: Number(pr.startTime || 0),
+        end: Number(pr.endTime || 0),
+        executed: Boolean(pr.executed),
+        finalized: Boolean(pr.finalized),
+        forVotes: Number(pr.forVotes || 0),
+        againstVotes: Number(pr.againstVotes || 0),
+        abstainVotes: Number(pr.abstainVotes || 0)
+      })
+
+      setSt(Number(state))
+    } catch (e: any) {
+      const raw = e?.message || String(e)
+      setErr(raw)
+    } finally {
+      setLoading(false)
+    }
   }
 
   useEffect(() => {
     ;(async () => {
-      try {
-        await refreshProposal()
-      } catch (e: any) {
-        setErr(e?.message || String(e))
-      }
+      await refreshProposal()
     })()
-  }, [pid])
+  }, [id])
 
+  const parsed = useMemo(() => parseProposalText(proposal?.description || ''), [proposal?.description])
 
-  
+  const totalVotes =
+    (proposal?.forVotes || 0) +
+    (proposal?.againstVotes || 0) +
+    (proposal?.abstainVotes || 0)
 
-  const totals = useMemo(() => {
-    if (!p) return { forV: 0, againstV: 0, abstainV: 0, sum: 0 }
-    const forV = Number(p.forVotes || 0)
-    const againstV = Number(p.againstVotes || 0)
-    const abstainV = Number(p.abstainVotes || 0)
-    return { forV, againstV, abstainV, sum: forV + againstV + abstainV }
-  }, [p])
+  const pageContext = useMemo(() => {
+    return {
+      path: window.location.pathname,
+      page: 'dao_proposal',
+      title: parsed.title,
+      context: {
+        proposalId: validPid ? pid : 0,
+        title: parsed.title,
+        sections: parsed.sections,
+        description: proposal?.description || '',
+        start: proposal?.start ?? 0,
+        end: proposal?.end ?? 0,
+        executed: proposal?.executed ?? false,
+        finalized: proposal?.finalized ?? false,
+        state: stateLabel(st),
+        forVotes: proposal?.forVotes ?? 0,
+        againstVotes: proposal?.againstVotes ?? 0,
+        abstainVotes: proposal?.abstainVotes ?? 0,
+        canVote,
+        lastErrorRaw: err || '',
+        lastErrorFriendlyTitle: friendlyErrorTitle || '',
+        lastErrorFriendlyMessage: friendlyErrorMessage || ''
+      }
+    }
+  }, [
+    pid,
+    validPid,
+    parsed.title,
+    parsed.sections,
+    proposal,
+    st,
+    canVote,
+    err,
+    friendlyErrorTitle,
+    friendlyErrorMessage
+  ])
 
-  const pct = (v: number) => (totals.sum ? Math.round((v / totals.sum) * 1000) / 10 : 0)
+  useEffect(() => {
+    sessionStorage.setItem('wallet_ai_context', JSON.stringify(pageContext))
+  }, [pageContext])
 
-  const [txErr, setTxErr] = useState('')
-  const [txMsg, setTxMsg] = useState('')
-  const [sending, setSending] = useState(false)
-  const canVote = st === 1
+  async function explainProposalWithAI() {
+    if (!proposal) return
 
-  async function vote(support: number) {
-    if (!dep) {
-      setErr('Deployment not loaded yet')
-      return
-    } //vote() 里增加防御
-    setTxErr('')
-    setTxMsg('')
-    setSending(true)
+    setAiExplaining(true)
+    setAiReply('')
+    setAiErr('')
+
     try {
-      const p = getInjectedProvider()
-      await requestAccounts(p)
-      const chainId = await getChainId(p)
-      const dep = await loadDeployments(chainId)
+      const r = await fetch('http://127.0.0.1:8787/llm/chat', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          message:
+            'Please explain this DAO proposal in a gentle, beginner-friendly way. Summarize what it wants to do, what the current status means, and what YES / NO / ABSTAIN would generally imply.',
+          page: 'dao_proposal',
+          context: pageContext.context,
+          history: []
+        })
+      })
 
-      console.log('vote debug:', { chainId, pid, dep })
-      console.log('entryPoint=', dep?.entryPoint, 'diamond=', dep?.diamondAccount)
+      const j = await r.json()
+      if (!r.ok) throw new Error(j?.detail || j?.error || 'llm chat error')
 
-      //const beneficiary = await p.getSigner().getAddress()
+      setAiReply(j?.reply || '')
+    } catch (e: any) {
+      setAiErr(e?.message || String(e))
+    } finally {
+      setAiExplaining(false)
+    }
+  }
+
+  async function vote(support: 1 | 2 | 3) {
+    setSending(true)
+    setMsg('')
+    setErr('')
+    setFriendlyErrorTitle('')
+    setFriendlyErrorMessage('')
+    setErrorModalOpen(false)
+
+    try {
+      if (!validPid) {
+        showFriendlyError(`Invalid proposal id: ${String(id)}`)
+        return
+      }
+
+      const { p, d } = await loadDep()
       const accounts = await p.listAccounts()
       if (!accounts.length) throw new Error('MetaMask not connected')
       const beneficiary = accounts[0]
 
-      console.log('beneficiary =', beneficiary)
-      
-      // 1) 先拿 memberId（必须用 signer，保证 msg.sender=你的MetaMask地址）
-      //const signer = p.getSigner();
-
-      //const identityView = new ethers.Contract(
-      //  dep.diamondAccount,
-      //  ['function currentMemberId() view returns (bytes32)'],
-      //  signer
-      //)
-      //const mid = await identityView.currentMemberId()
-      //console.log('[debug] currentMemberId(from signer)=', mid)
-      
-      const { eoa, memberId } = await getStableMemberId(p);
-      const mid = memberId;
-      console.log("[vote] eoa=", eoa, "mid(stable)=", mid);
-      // 2️ 再构造 callData
-      const daoIface = new ethers.utils.Interface([
-        'function castVoteAs(uint256 proposalId, uint8 support, bytes32 voterMemberId)'
-      ]);
+      const { memberId } = await getStableMemberId(p)
+      const mid = memberId
 
       const daoRead = new ethers.Contract(
-      dep.diamondAccount,
-      ["function isMember(bytes32) view returns (bool)"],
-      p
-    );
-    const ok = await daoRead.isMember(mid);
-    if (!ok) {
-      setTxMsg("You are not a DAO member (NotMember). mid=" + mid);
-      setSending(false);
-      return;
-    }
+        d.diamondAccount,
+        ['function isMember(bytes32) view returns (bool)'],
+        p
+      )
 
-    const callData = daoIface.encodeFunctionData(
-        'castVoteAs',
-        [Number(pid), support, mid]
-      );
-      
+      const ok = await daoRead.isMember(mid)
+      if (!ok) {
+        showFriendlyError('NotMember')
+        return
+      }
+
+      const daoIface = new ethers.utils.Interface([
+        'function castVoteAs(uint256 proposalId, uint8 support, bytes32 voterMemberId)'
+      ])
+
+      const callData = daoIface.encodeFunctionData('castVoteAs', [pid, support, mid])
+
       const { userOp, userOpHash } = await buildUserOp({
         provider: p,
-        entryPoint: dep.entryPoint,
-        diamond: dep.diamondAccount,
+        entryPoint: d.entryPoint,
+        diamond: d.diamondAccount,
         callData
       })
 
-      try {
-        userOp.signature = await signUserOpEOA({ provider: p, userOpHash })
+      userOp.signature = await signUserOpEOA({ provider: p, userOpHash })
 
-        const { receipt, success, revertReason } = await sendUserOp({
-          provider: p,
-          entryPoint: dep.entryPoint,
-          beneficiary,
-          userOp,
-          userOpHash, // 关键：传进去才能匹配日志
-        })
+      const { receipt, success, revertReason } = await sendUserOp({
+        provider: p,
+        entryPoint: d.entryPoint,
+        beneficiary,
+        userOp,
+        userOpHash
+      })
 
-        console.log('vote receipt', receipt)
-        console.log('userOp success=', success, 'revertReason=', revertReason)
-
-        if (success !== true) {
-          // UI 给用户可读提示
-          if (revertReason === 'AlreadyVoted') {
-            setTxErr('You have already voted on this proposal.')
-          } else if (revertReason === 'InvalidState' || revertReason === 'VotingClosed') {
-            setTxErr('Voting is not active for this proposal (closed or invalid state).')
-          } else if (revertReason === 'NotMember') {
-            setTxErr('You are not a DAO member (NotMember).')
-          } else {
-            setTxErr(`Vote failed: ${revertReason || 'unknown reason'}`)
-          }
-          return
+      if (success !== true) {
+        if (revertReason === 'AlreadyVoted') {
+          showFriendlyError('AlreadyVoted')
+        } else if (revertReason === 'InvalidState' || revertReason === 'VotingClosed') {
+          showFriendlyError(String(revertReason))
+        } else if (revertReason === 'NotMember') {
+          showFriendlyError('NotMember')
+        } else {
+          showFriendlyError(`Vote failed: ${revertReason || 'unknown reason'}`)
         }
-
-        // 只有真正 success 才显示成功
-        setTxMsg(`Voted successfully. tx=${receipt.transactionHash}`)
-        setErr('')
-        await refreshProposal()
-        return
-      } catch (e: any) {
-        console.error('vote error raw', e)
-        console.error('vote error message', e?.message)
-        console.error('vote error data', e?.data)
-        console.error('vote error reason', e?.reason)
-        console.error('vote error shortMessage', e?.shortMessage)
-
-        setErr(e?.shortMessage || e?.reason || e?.message || String(e))
         return
       }
+
+      setMsg(`Voted successfully. tx=${receipt.transactionHash}`)
+      await refreshProposal()
     } catch (e: any) {
-      setTxErr(e?.message || String(e))
+      const raw = e?.shortMessage || e?.reason || e?.message || String(e)
+      showFriendlyError(raw)
     } finally {
       setSending(false)
     }
   }
 
-
   return (
     <Layout
       title='DAO Proposal'
-      right={<button className='btn btnGhost' onClick={() => nav('/dao')}>←</button>}
+      right={
+        <button className='btn btnGhost' onClick={() => nav('/dao')}>
+          ←
+        </button>
+      }
     >
-      {err && (
-        <div className='card' style={{ padding: 14, borderColor: 'rgba(255,77,90,.35)' }}>
-          <div className='small'>Error</div>
-          <div style={{ marginTop: 8 }}>{err}</div>
-        </div>
-      )}
-
-      {!p ? (
-        <div className='card' style={{ padding: 16 }}>
-          <div className='small'>Loading...</div>
-        </div>
-      ) : (
-        <>
-          <div className='card' style={{ padding: 16 }}>
-            <div className='row' style={{ justifyContent: 'space-between', gap: 12 }}>
-              <div className='h2' style={{ flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                {String(p.description)}
+      {errorModalOpen && (
+        <div
+          style={{
+            position: 'fixed',
+            inset: 0,
+            background: 'rgba(0,0,0,.45)',
+            zIndex: 80,
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            padding: 20
+          }}
+        >
+          <div
+            className='card'
+            style={{
+              width: 'min(520px, 100%)',
+              padding: 18,
+              borderColor: 'rgba(255,77,90,.25)',
+              boxShadow: '0 24px 80px rgba(0,0,0,.35)'
+            }}
+          >
+            <div
+              className='row'
+              style={{ justifyContent: 'space-between', alignItems: 'center', gap: 12 }}
+            >
+              <div className='h2' style={{ color: 'rgba(255,220,220,.96)' }}>
+                {friendlyErrorTitle || 'Transaction failed'}
               </div>
-              <div className='small'>{stateLabel(st)}</div>
-            </div>
 
-            <div className='small' style={{ marginTop: 10 }}>
-              start: {String(p.startTime)} • end: {String(p.endTime)} • executed: {String(p.executed)} • finalized: {String(p.finalized)}
-            </div>
-
-            <div className='cardSoft' style={{ marginTop: 14, padding: 14 }}>
-              <div className='small'>AI Summary（预留）</div>
-              <div className='small'>后续接入 Chatbot：总结提案、解释影响、辅助投票。</div>
-            </div>
-
-            <div style={{ marginTop: 14 }}>
               <button
-                disabled={sending || !dep || !canVote} //Vote 按钮禁用直到 dep 存在
+                className='btn btnGhost'
+                onClick={() => setErrorModalOpen(false)}
+              >
+                Close
+              </button>
+            </div>
+
+            <div
+              className='small'
+              style={{
+                marginTop: 12,
+                lineHeight: 1.7,
+                whiteSpace: 'pre-wrap',
+                opacity: 0.92
+              }}
+            >
+              {friendlyErrorMessage}
+            </div>
+
+            {err && (
+              <div
+                className='small'
+                style={{
+                  marginTop: 14,
+                  opacity: 0.68,
+                  whiteSpace: 'pre-wrap'
+                }}
+              >
+                Raw error: {shortenError(err)}
+              </div>
+            )}
+
+            <div style={{ marginTop: 16 }}>
+              <button
                 className='btn btnPrimary'
+                onClick={() => setErrorModalOpen(false)}
                 style={{ width: '100%' }}
-                onClick={() => vote(1)}
               >
-                {sending ? 'Sending…' : 'Vote YES (AA)'}
+                Got it
               </button>
-
-              <button
-                disabled={sending || !dep || !canVote}//Vote 按钮禁用直到 dep 存在
-                className='btn'
-                style={{ width: '100%', marginTop: 8 }}
-                onClick={() => vote(2)}
-              >
-                {sending ? 'Sending…' : 'Vote NO (AA)'}
-              </button>
-
-              <button
-                disabled={sending || !dep || !canVote}
-                className='btn'
-                style={{ width: '100%', marginTop: 8 }}
-                onClick={() => vote(3)}
-              >
-                {sending ? 'Sending...' : 'Vote ABSTAIN (AA)'}
-              </button>
-
-              {!canVote && (
-                <div style={{ marginTop: 10, color: 'rgba(255,255,255,.6)' }}>
-                  Voting is not active. Current state: {stateLabel(st)}
-                </div>
-              )}
-
-              {txMsg && (
-                <div style={{ marginTop: 10, color: 'var(--green)' }}>
-                  {txMsg}
-                </div>
-              )}
-
-              {txErr && (
-                <div style={{ marginTop: 10, color: 'rgba(255,77,90,.9)' }}>
-                  {txErr}
-                </div>
-              )}
             </div>
           </div>
-
-          <div className='card' style={{ marginTop: 14, padding: 16 }}>
-            <div className='h2'>Current Results</div>
-
-            <div style={{ marginTop: 12 }}>
-              <div className='row' style={{ justifyContent: 'space-between' }}>
-                <div className='small'>Yes / For</div>
-                <div className='small'>{pct(totals.forV)}%</div>
-              </div>
-              <div style={{ height: 10, borderRadius: 999, background: 'rgba(255,255,255,.08)', overflow: 'hidden' }}>
-                <div style={{ height: '100%', width: `${pct(totals.forV)}%`, background: 'var(--green)' }} />
-              </div>
-
-              <div className='row' style={{ justifyContent: 'space-between', marginTop: 12 }}>
-                <div className='small'>No / Against</div>
-                <div className='small'>{pct(totals.againstV)}%</div>
-              </div>
-              <div style={{ height: 10, borderRadius: 999, background: 'rgba(255,255,255,.08)', overflow: 'hidden' }}>
-                <div style={{ height: '100%', width: `${pct(totals.againstV)}%`, background: 'rgba(255,255,255,.35)' }} />
-              </div>
-
-              <div className='row' style={{ justifyContent: 'space-between', marginTop: 12 }}>
-                <div className='small'>Abstain</div>
-                <div className='small'>{pct(totals.abstainV)}%</div>
-              </div>
-              <div style={{ height: 10, borderRadius: 999, background: 'rgba(255,255,255,.08)', overflow: 'hidden' }}>
-                <div style={{ height: '100%', width: `${pct(totals.abstainV)}%`, background: 'var(--blue)' }} />
-              </div>
-
-              <div className='small' style={{ marginTop: 12 }}>
-                totals: for {totals.forV} • against {totals.againstV} • abstain {totals.abstainV}
-              </div>
-            </div>
-          </div>
-        </>
+        </div>
       )}
+
+      <div className='card' style={{ padding: 16 }}>
+        <div
+          style={{
+            display: 'flex',
+            alignItems: 'flex-start',
+            justifyContent: 'space-between',
+            gap: 12
+          }}
+        >
+          <div className='h2' style={{ flex: 1 }}>
+            {parsed.title}
+          </div>
+
+          <div
+            style={{
+              padding: '6px 12px',
+              borderRadius: 999,
+              border: '1px solid rgba(255,255,255,.10)',
+              background: 'rgba(255,255,255,.04)',
+              fontWeight: 700,
+              whiteSpace: 'nowrap'
+            }}
+          >
+            {loading ? 'Loading' : stateLabel(st)}
+          </div>
+        </div>
+
+        {proposal && (
+          <div className='small' style={{ marginTop: 10, opacity: 0.82 }}>
+            start: {proposal.start} • end: {proposal.end} • executed: {String(proposal.executed)} • finalized: {String(proposal.finalized)}
+          </div>
+        )}
+
+        <div
+          className='cardSoft'
+          style={{
+            marginTop: 16,
+            padding: 14,
+            borderRadius: 24
+          }}
+        >
+          <div className='small' style={{ fontWeight: 700, opacity: 0.88 }}>
+            AI Summary
+          </div>
+
+          <div className='small' style={{ marginTop: 8, opacity: 0.82 }}>
+            Ask AI to explain this proposal, its current status, and what the voting options mean.
+          </div>
+
+          <div style={{ marginTop: 14 }}>
+            <button
+              className='btn btnGhost'
+              onClick={explainProposalWithAI}
+              disabled={aiExplaining || loading || !proposal}
+            >
+              {aiExplaining ? 'Explaining…' : 'Explain this proposal with AI'}
+            </button>
+          </div>
+
+          {aiReply && (
+            <div
+              className='small'
+              style={{
+                marginTop: 14,
+                lineHeight: 1.7,
+                whiteSpace: 'pre-wrap',
+                opacity: 0.92
+              }}
+            >
+              {aiReply}
+            </div>
+          )}
+
+          {aiErr && (
+            <div style={{ marginTop: 10, color: 'rgba(255,77,90,.92)' }}>
+              AI explain error: {aiErr}
+            </div>
+          )}
+        </div>
+
+        <div style={{ marginTop: 20 }}>
+          <div className='h2' style={{ fontSize: 22 }}>
+            Proposal Details
+          </div>
+
+          {parsed.sections.length > 0 ? (
+            <div className='col g12' style={{ marginTop: 14 }}>
+              {parsed.sections.map((sec, idx) => (
+                <div
+                  key={`${sec.heading}-${idx}`}
+                  className='cardSoft'
+                  style={{
+                    padding: 14,
+                    borderRadius: 20
+                  }}
+                >
+                  <div
+                    style={{
+                      fontWeight: 800,
+                      fontSize: 18,
+                      marginBottom: 10
+                    }}
+                  >
+                    {sec.heading}
+                  </div>
+
+                  <div
+                    className='small'
+                    style={{
+                      whiteSpace: 'pre-wrap',
+                      lineHeight: 1.8,
+                      opacity: 0.9
+                    }}
+                  >
+                    {sec.content}
+                  </div>
+                </div>
+              ))}
+            </div>
+          ) : (
+            <div className='small' style={{ marginTop: 12, opacity: 0.72 }}>
+              No proposal body available.
+            </div>
+          )}
+        </div>
+
+        <div className='col g12' style={{ marginTop: 20 }}>
+          <button
+            className='btn btnPrimary'
+            onClick={() => vote(1)}
+            disabled={sending || loading || !canVote}
+          >
+            {sending ? 'Sending…' : 'Vote YES (AA)'}
+          </button>
+
+          <button
+            className='btn'
+            onClick={() => vote(2)}
+            disabled={sending || loading || !canVote}
+          >
+            {sending ? 'Sending…' : 'Vote NO (AA)'}
+          </button>
+
+          <button
+            className='btn'
+            onClick={() => vote(3)}
+            disabled={sending || loading || !canVote}
+          >
+            {sending ? 'Sending…' : 'Vote ABSTAIN (AA)'}
+          </button>
+
+          {!canVote && !loading && (
+            <div style={{ marginTop: 10, color: 'rgba(255,255,255,.6)' }}>
+              Voting is not active. Current state: {stateLabel(st)}
+            </div>
+          )}
+        </div>
+      </div>
+
+      <div className='card' style={{ padding: 16, marginTop: 16 }}>
+        <div className='h2'>Current Results</div>
+
+        <div style={{ marginTop: 14 }}>
+          <div
+            style={{
+              display: 'flex',
+              justifyContent: 'space-between',
+              marginBottom: 6
+            }}
+          >
+            <div className='small'>Yes / For</div>
+            <div className='small'>{pct(proposal?.forVotes || 0, totalVotes)}%</div>
+          </div>
+          <div
+            style={{
+              height: 18,
+              borderRadius: 999,
+              background: 'rgba(255,255,255,.08)',
+              overflow: 'hidden'
+            }}
+          >
+            <div
+              style={{
+                width: `${pct(proposal?.forVotes || 0, totalVotes)}%`,
+                height: '100%',
+                borderRadius: 999,
+                background: 'linear-gradient(90deg, #45e6b8, #5aa0ff)'
+              }}
+            />
+          </div>
+        </div>
+
+        <div style={{ marginTop: 18 }}>
+          <div
+            style={{
+              display: 'flex',
+              justifyContent: 'space-between',
+              marginBottom: 6
+            }}
+          >
+            <div className='small'>No / Against</div>
+            <div className='small'>{pct(proposal?.againstVotes || 0, totalVotes)}%</div>
+          </div>
+          <div
+            style={{
+              height: 18,
+              borderRadius: 999,
+              background: 'rgba(255,255,255,.08)',
+              overflow: 'hidden'
+            }}
+          >
+            <div
+              style={{
+                width: `${pct(proposal?.againstVotes || 0, totalVotes)}%`,
+                height: '100%',
+                borderRadius: 999,
+                background: 'rgba(255,255,255,.18)'
+              }}
+            />
+          </div>
+        </div>
+
+        <div style={{ marginTop: 18 }}>
+          <div
+            style={{
+              display: 'flex',
+              justifyContent: 'space-between',
+              marginBottom: 6
+            }}
+          >
+            <div className='small'>Abstain</div>
+            <div className='small'>{pct(proposal?.abstainVotes || 0, totalVotes)}%</div>
+          </div>
+          <div
+            style={{
+              height: 18,
+              borderRadius: 999,
+              background: 'rgba(255,255,255,.08)',
+              overflow: 'hidden'
+            }}
+          >
+            <div
+              style={{
+                width: `${pct(proposal?.abstainVotes || 0, totalVotes)}%`,
+                height: '100%',
+                borderRadius: 999,
+                background: 'rgba(255,255,255,.12)'
+              }}
+            />
+          </div>
+        </div>
+
+        <div className='small' style={{ marginTop: 16, opacity: 0.82 }}>
+          totals: for {proposal?.forVotes || 0} • against {proposal?.againstVotes || 0} • abstain {proposal?.abstainVotes || 0}
+        </div>
+
+        {msg && <div style={{ marginTop: 12, color: 'var(--green)' }}>{msg}</div>}
+        {err && <div style={{ marginTop: 12, color: 'rgba(255,77,90,.92)' }}>{err}</div>}
+      </div>
     </Layout>
   )
 }

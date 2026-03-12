@@ -1,6 +1,7 @@
 import Layout from '../components/Layout'
 import { useNavigate } from 'react-router-dom'
 import { useEffect, useMemo, useState } from 'react'
+import { getHistory } from '../lib/history'
 
 type SwapQuoteResponse = {
   bestRoute: {
@@ -17,8 +18,12 @@ export default function Trade() {
   const [quote, setQuote] = useState<SwapQuoteResponse | null>(null)
   const [loading, setLoading] = useState(true)
   const [err, setErr] = useState('')
+  const [history, setHistory] = useState<any[]>([])
 
   useEffect(() => {
+    // 先加载本地交易历史
+    setHistory(getHistory())
+    
     let alive = true
 
     ;(async () => {
@@ -65,15 +70,15 @@ export default function Trade() {
   }, [loading, err, quote])
 
   const gasSubtitle = useMemo(() => {
-    if (loading) return '正在读取当前链上交易成本...'
-    if (err) return '暂时无法获取网络 gas 信息'
+    if (loading) return 'Reading current on-chain transaction cost...'
+    if (err) return 'Unable to retrieve network gas information.'
     return `≈ ${quote?.bestRoute?.gasCostUsdApprox || 'N/A'}`
   }, [loading, err, quote])
 
   const assistantText = useMemo(() => {
-    if (loading) return 'AI 正在分析当前网络状态与交易环境...'
-    if (err) return 'AI 暂时无法获取链上报价数据，请稍后重试。'
-    return 'AI 已完成交易环境分析。进入 Send 或 Swap 页面可查看对应操作的详细成本、路径与建议。'
+    if (loading) return 'AI is analyzing the current network conditions and transaction environment...'
+    if (err) return 'AI is currently unable to retrieve on-chain quote data. Please try again later.'
+    return 'AI has completed the transaction environment analysis. Navigate to the Send or Swap page to view detailed costs, paths, and recommendations for each operation.'
   }, [loading, err])
 
   return (
@@ -117,11 +122,47 @@ export default function Trade() {
         </div>
       </div>
 
-      <div className='card' style={{ marginTop: 14, padding: 16 }}>
-        <div className='h2'>History</div>
-        <div className='small' style={{ marginTop: 8 }}>
-          预留：后续接入交易历史（本地缓存 + 链上事件索引）
-        </div>
+      <div className="card">
+        <div className="h2">History</div>
+
+        {history.length === 0 && (
+          <div className="small" style={{ marginTop: 8 }}>
+            No recent activity
+          </div>
+        )}
+
+        {history.slice(0,5).map((h, i) => (
+          <div key={i} style={{ marginTop: 12 }}>
+            {h.type === 'swap' && (
+            <>
+              <div className="small" style={{ fontWeight: 600 }}>
+                {i + 1}. Swap {h.tokenIn} → {h.tokenOut}
+              </div>
+
+                <div className="small">
+                  {h.amountIn} → {h.amountOut}
+                </div>
+              </>
+            )}
+
+            {h.type === 'transfer' && (
+              <>
+                <div className="small" style={{ fontWeight: 600 }}>
+                  {i + 1}. Send {h.tokenIn}
+                </div>
+
+                <div className="small">
+                  {h.amountIn} to {h.to?.slice(0,6)}...
+                </div>
+              </>
+            )}
+
+            <div className="small" style={{ opacity: 0.7 }}>
+              {new Date(h.time).toLocaleTimeString()}
+            </div>
+
+          </div>
+        ))}
       </div>
     </Layout>
   )

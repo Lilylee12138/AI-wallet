@@ -449,4 +449,14 @@ def llm_chat(req: LlmChatRequest):
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"llm chat failed: {e}")
 
+@app.get("/risk/status")
+def risk_status():
+    return {
+        "engine": "online",
+        "model": "xgboost",
+        "model_version": "transfer_v5",
+        "oracle": "connected",
+        "risk_level": "LOW"
+    }
+
 

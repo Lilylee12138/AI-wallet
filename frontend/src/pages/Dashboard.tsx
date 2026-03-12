@@ -17,10 +17,25 @@ type TokenBalances = {
   WETH: string
 }
 
+type RiskStatus = {
+  engine?: string
+  model?: string
+  model_version?: string
+  oracle?: string
+  risk_level?: string
+}
+
 function fmt(v: string) {
   const n = Number(v || '0')
   if (!Number.isFinite(n)) return '0.0000'
   return n.toFixed(4)
+}
+
+function riskColor(level?: string) {
+  const s = String(level || '').toUpperCase()
+  if (s === 'HIGH') return 'rgba(255,77,90,.95)'
+  if (s === 'MEDIUM') return 'rgba(255,196,77,.95)'
+  return 'var(--green)'
 }
 
 export default function Dashboard() {
@@ -35,6 +50,8 @@ export default function Dashboard() {
   })
   const [err, setErr] = useState('')
   const [refreshing, setRefreshing] = useState(false)
+
+  const [riskStatus, setRiskStatus] = useState<RiskStatus | null>(null)
 
   const refreshBalances = useCallback(async () => {
     try {
@@ -86,26 +103,41 @@ export default function Dashboard() {
     }
   }, [])
 
+  const refreshRiskStatus = useCallback(async () => {
+    try {
+      const r = await fetch('http://127.0.0.1:8787/risk/status')
+      if (!r.ok) throw new Error(`HTTP ${r.status}`)
+      const j = await r.json()
+      setRiskStatus(j)
+    } catch (e) {
+      console.error(e)
+      setRiskStatus(null)
+    }
+  }, [])
+
   useEffect(() => {
     refreshBalances()
-  }, [refreshBalances])
+    refreshRiskStatus()
+  }, [refreshBalances, refreshRiskStatus])
 
   useEffect(() => {
     const onFocus = () => {
       refreshBalances()
+      refreshRiskStatus()
     }
 
     window.addEventListener('focus', onFocus)
     return () => window.removeEventListener('focus', onFocus)
-  }, [refreshBalances])
+  }, [refreshBalances, refreshRiskStatus])
 
   useEffect(() => {
     const timer = window.setInterval(() => {
       refreshBalances()
+      refreshRiskStatus()
     }, 8000)
 
     return () => window.clearInterval(timer)
-  }, [refreshBalances])
+  }, [refreshBalances, refreshRiskStatus])
 
   return (
     <Layout title='Main Wallet'>
@@ -128,29 +160,55 @@ export default function Dashboard() {
       >
         <div className='card' style={{ padding: 14 }}>
           <div className='small'>Risk Guard</div>
+
           <div
             style={{
               marginTop: 8,
               fontWeight: 900,
               fontSize: 18,
-              color: 'var(--green)',
+              color: riskColor(riskStatus?.risk_level),
             }}
           >
-            Secure
+            {riskStatus ? 'Secure' : 'Loading...'}
           </div>
+
+          <div className='small' style={{ marginTop: 10 }}>
+            {riskStatus?.engine === 'online' ? '✔ AI Engine Online' : '✖ AI Engine Offline'}
+          </div>
+
+          <div className='small'>
+            {riskStatus?.oracle === 'connected' ? '✔ Oracle Connected' : '✖ Oracle Offline'}
+          </div>
+
+          <div className='small'>
+            {riskStatus?.model ? '✔ Model Loaded' : '✖ Model Missing'}
+          </div>
+
           <div className='small' style={{ marginTop: 8 }}>
-            AI risk monitoring enabled
+            Risk level: {riskStatus?.risk_level || '-'}
           </div>
+
+          {riskStatus?.model_version && (
+            <div className='small' style={{ marginTop: 4, opacity: 0.72 }}>
+              Model: {riskStatus.model_version}
+            </div>
+          )}
         </div>
 
         <div className='card' style={{ padding: 14 }}>
           <div className='small'>Profile</div>
 
-          <div className='small' style={{ marginTop: 8 }}>
-            Smart Account: {diamond ? `${diamond.slice(0, 10)}...${diamond.slice(-4)}` : 'Loading...'}
+          <div
+            className='small'
+            style={{ marginTop: 8, wordBreak: 'break-all' }}
+          >
+            Smart Account: {diamond || '-'}
           </div>
 
-          <div className='small' style={{ marginTop: 6 }}>
+          <div
+            className='small'
+            style={{ marginTop: 6, wordBreak: 'break-all' }}
+          >
             EOA: {addr || 'Loading...'}
           </div>
 
@@ -169,7 +227,10 @@ export default function Dashboard() {
           <button
             className='btn btnGhost'
             style={{ padding: '8px 14px', minWidth: 0 }}
-            onClick={refreshBalances}
+            onClick={() => {
+              refreshBalances()
+              refreshRiskStatus()
+            }}
             disabled={refreshing}
           >
             {refreshing ? 'Refreshing...' : 'Refresh'}

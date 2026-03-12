@@ -62,6 +62,26 @@ async function main() {
   const riskOracleFacet = await RiskOracleFacet.deploy()
   await riskOracleFacet.deployed()
 
+  // NEW： ConfigFacet (MVP)
+  const ConfigFacet = await ethers.getContractFactory('ConfigFacet')
+  const configFacet = await ConfigFacet.deploy()
+  await configFacet.deployed()
+
+  // NEW: DiamondOwnershipFacet (for ownership transfer, if needed in the future)
+  const DiamondOwnershipFacet = await ethers.getContractFactory('DiamondOwnershipFacet')
+  const diamondOwnershipFacet = await DiamondOwnershipFacet.deploy()
+  await diamondOwnershipFacet.deployed()
+
+  // NEW: DiamondLoupeFacet (for introspection, not strictly needed for MVP)
+  const DiamondLoupeFacet = await ethers.getContractFactory('DiamondLoupeFacet')
+  const diamondLoupeFacet = await DiamondLoupeFacet.deploy()
+  await diamondLoupeFacet.deployed()
+
+  // NEW: Lightweight DiamondCutFacet
+  const DiamondCutFacet = await ethers.getContractFactory('DiamondCutFacet')
+  const diamondCutFacet = await DiamondCutFacet.deploy()
+  await diamondCutFacet.deployed()
+
   console.log('Facets deployed:')
   console.log('  ValidationFacet:', validationFacet.address)
   console.log('  ExecutionFacet:', executionFacet.address)
@@ -70,6 +90,10 @@ async function main() {
   console.log('  NonceFacet:', nonceFacet.address)
   console.log('  EntryPointDepositFacet:', depositFacet.address)
   console.log('  RiskOracleFacet:', riskOracleFacet.address)
+  console.log('  ConfigFacet:', configFacet.address)
+  console.log('  DiamondOwnershipFacet:', diamondOwnershipFacet.address)
+  console.log('  DiamondLoupeFacet:', diamondLoupeFacet.address)
+  console.log('  DiamondCutFacet:', diamondCutFacet.address)
 
   // 4) Register facets via setFacet
   async function registerFacet(facet: any) {
@@ -87,6 +111,10 @@ async function main() {
   await registerFacet(nonceFacet)
   await registerFacet(depositFacet)
   await registerFacet(riskOracleFacet)
+  await registerFacet(configFacet)
+  await registerFacet(diamondOwnershipFacet)
+  await registerFacet(diamondLoupeFacet)
+  await registerFacet(diamondCutFacet)
 
   console.log('Facets registered')
 
@@ -112,6 +140,30 @@ async function main() {
   await (await riskAsDiamond.setRiskThresholdBps(thresholdBps)).wait()
   console.log('[risk] oracleSigner:', await riskAsDiamond.getOracleSigner())
   console.log('[risk] thresholdBps:', await riskAsDiamond.getRiskThresholdBps())
+
+  // NEW: Initialize ConfigFacet defaults
+  try {
+    const configAsDiamond = new ethers.Contract(
+      diamond.address,
+      [
+        'function initConfigDefaults()',
+        'function getConfig() view returns (uint16,uint8,bool,bool,bool)',
+      ],
+      owner
+    )
+
+    await (await configAsDiamond.initConfigDefaults()).wait()
+    const cfg = await configAsDiamond.getConfig()
+
+    console.log('[config] initialized')
+    console.log('[config] riskThresholdBps:', cfg[0].toString())
+    console.log('[config] validationMode:', cfg[1].toString())
+    console.log('[config] aiExplainEnabled:', cfg[2])
+    console.log('[config] swapAdviceEnabled:', cfg[3])
+    console.log('[config] initialized flag:', cfg[4])
+  } catch (e: any) {
+    console.warn('[config] init skipped or failed:', e?.message || String(e))
+  }
 
   // 5) Bind critical selectors (avoid FacetNotSet)
   const daoCriticalSigs = [
@@ -171,11 +223,106 @@ async function main() {
   const metaHash = ethers.constants.HashZero
 
   const proposals: Array<[string, string]> = [
-    ['TIP-40: Security Audit Funding', 'Fund external audit firm.'],
-    ['TIP-41: Treasury Diversification', 'Diversify treasury assets.'],
-    ['TIP-42: Liquidity Pool Update', 'Update LP incentives.'],
-    ['TIP-43: Governance Upgrade', 'Upgrade governance mechanism.'],
-    ['TIP-44: Passkey Adoption Incentive', 'Incentivize passkey users.'],
+    [
+      'TIP-40: Security Audit Funding',
+      `Motivation
+  The protocol is preparing for broader public testing and future feature expansion. Before scaling usage, the smart wallet contracts and governance modules should undergo an external security review.
+
+  Specification
+  This proposal requests treasury funding to commission an external audit firm to review the ERC-4337 account abstraction flow, Diamond facet interactions, governance voting logic, and risk attestation validation.
+
+  Benefits
+  - Improves protocol security
+  - Reduces deployment risk
+  - Increases user trust
+
+  Risks
+  - Treasury spending will increase in the short term
+  - Audit recommendations may require additional development work
+
+  Timeline
+  If approved, the audit process should begin immediately after proposal finalization.`
+    ],
+    [
+      'TIP-41: Treasury Diversification',
+      `Motivation
+  The treasury is currently concentrated in a limited set of assets. This creates unnecessary exposure to single-asset volatility and reduces flexibility for future ecosystem spending.
+
+  Specification
+  This proposal recommends gradually diversifying treasury holdings across stable assets and ecosystem-aligned reserve assets. The goal is to improve resilience while maintaining sufficient liquidity for protocol operations and incentives.
+
+  Benefits
+  - Reduces treasury concentration risk
+  - Improves financial stability
+  - Supports long-term sustainability
+
+  Risks
+  - Diversification decisions may underperform short-term market moves
+  - Requires governance oversight on treasury policy
+
+  Timeline
+  Execution should begin in phases after approval, with regular governance review of treasury allocation changes.`
+    ],
+    [
+      'TIP-42: Liquidity Pool Update',
+      `Motivation
+  Current liquidity incentives may not sufficiently support healthy swap routing conditions for protocol-integrated assets. Improving liquidity depth can reduce price impact and enhance user swap experience.
+
+  Specification
+  This proposal introduces an updated liquidity incentive program for selected pairs, with focus on improving depth in core governance and stable asset pools. Incentives should prioritize sustainable liquidity rather than short-term farming activity.
+
+  Benefits
+  - Improves swap execution quality
+  - Reduces price impact for users
+  - Creates better conditions for route analysis and AI-assisted swap recommendations
+
+  Risks
+  - Incentives may attract temporary liquidity only
+  - Treasury usage must be monitored
+
+  Timeline
+  The new liquidity policy should be activated after governance approval and reviewed periodically based on pool performance.`
+    ],
+    [
+      'TIP-43: Governance Upgrade',
+      `Motivation
+  The existing governance process is functional but minimal. As the protocol grows, governance should become more transparent, predictable, and secure.
+
+  Specification
+  This proposal upgrades governance procedures by introducing stronger proposal review standards, clearer quorum expectations, and improved execution safeguards. Future governance proposals should include structured sections such as motivation, specification, risks, and expected impact.
+
+  Benefits
+  - Improves governance quality
+  - Makes proposals easier for users and AI assistants to interpret
+  - Reduces ambiguity in decision-making
+
+  Risks
+  - Governance may become slightly slower
+  - Contributors may need to adapt to more formal proposal standards
+
+  Timeline
+  The upgraded proposal standard should apply to future governance actions immediately after approval.`
+    ],
+    [
+      'TIP-44: Passkey Adoption Incentive',
+      `Motivation
+  Passkey-based authentication can improve usability and security for smart contract wallets. However, user adoption may remain slow without clear incentives.
+
+  Specification
+  This proposal introduces a limited incentive program for users who activate passkey authentication and complete wallet onboarding with secure recovery settings. The initiative aims to encourage better wallet security practices.
+
+  Benefits
+  - Promotes safer authentication methods
+  - Improves wallet usability for non-technical users
+  - Aligns with the protocol goal of combining AI assistance with secure account abstraction
+
+  Risks
+  - Incentive abuse must be monitored
+  - Program design must avoid excessive treasury leakage
+
+  Timeline
+  If approved, the incentive campaign should begin in the next onboarding cycle and be reviewed after initial participation metrics are collected.`
+    ]
   ]
 
   for (const [title, desc] of proposals) {

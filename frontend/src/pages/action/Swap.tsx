@@ -6,6 +6,7 @@ import { useNavigate } from 'react-router-dom'
 import { getInjectedProvider, requestAccounts, getChainId } from '../../lib/eth'
 import { loadDeployments } from '../../config/deployments'
 import { buildUserOp, signUserOpEOA, sendUserOp } from '../../lib/aa'
+import { appendHistory } from '../../lib/history'
 
 const API_BASE = 'http://127.0.0.1:8787'
 
@@ -73,15 +74,90 @@ function symbolToAddress(sym: string, dep: any) {
   return dep.tokens[sym]
 }
 
-function pctStringToBps(s: string) {
-  const n = Number(String(s).replace('%', '').trim())
-  if (!Number.isFinite(n) || n < 0) return 0
-  return Math.floor(n * 100)
-}
-
 function presetToDisplay(v: string) {
   if (v === 'auto') return 'Auto'
   return `${v}%`
+}
+
+function isDepositIssue(msg: string) {
+  const s = String(msg || '').toLowerCase()
+  return (
+    s.includes('deposit') ||
+    s.includes('entrypoint') ||
+    s.includes("aa21 didn't pay prefund") ||
+    s.includes('prefund')
+  )
+}
+
+function mapFriendlySwapError(raw: string) {
+  const msg = String(raw || '')
+
+  if (msg.includes("AA21 didn't pay prefund")) {
+    return {
+      title: 'Not enough gas prefund',
+      message:
+        'This swap could not be submitted because the smart wallet does not have enough prefund for the ERC-4337 operation. Please add more ETH to the wallet or deposit more ETH into the EntryPoint gas tank, then try again.'
+    }
+  }
+
+  if (msg.includes('MetaMask not connected')) {
+    return {
+      title: 'Wallet not connected',
+      message:
+        'Your wallet is not connected. Please connect MetaMask first, then try again.'
+    }
+  }
+
+  if (msg.includes('Amount must be > 0')) {
+    return {
+      title: 'Invalid swap amount',
+      message:
+        'The swap amount must be greater than zero.'
+    }
+  }
+
+  if (msg.includes('No quote available')) {
+    return {
+      title: 'No quote available',
+      message:
+        'The wallet could not generate a valid swap quote for the current token pair and amount. Please adjust the amount or try another token pair.'
+    }
+  }
+
+  if (msg.includes('Current real execution supports')) {
+    return {
+      title: 'Pair not supported for execution',
+      message:
+        'This token combination can be analyzed by the quote engine, but real on-chain execution is not enabled yet for this route.'
+    }
+  }
+
+  if (msg.includes('user rejected') || msg.includes('User denied')) {
+    return {
+      title: 'Transaction cancelled',
+      message:
+        'The swap transaction was cancelled in the wallet before it was submitted.'
+    }
+  }
+
+  if (msg.includes('reverted')) {
+    return {
+      title: 'Swap reverted',
+      message:
+        'The swap transaction was submitted but reverted during execution. This may happen because of insufficient prefund, slippage conditions, approval issues, or route execution problems.'
+    }
+  }
+
+  return {
+    title: 'Swap failed',
+    message:
+      'The swap could not be completed. Please check the quote, amount, supported token pair, wallet balance, and EntryPoint gas tank balance, then try again.'
+  }
+}
+
+function shortenError(raw: string) {
+  const text = String(raw || '')
+  return text.length > 240 ? `${text.slice(0, 240)}...` : text
 }
 
 export default function ActionSwap() {
@@ -104,6 +180,15 @@ export default function ActionSwap() {
   const [txMsg, setTxMsg] = useState('')
   const [txErr, setTxErr] = useState('')
 
+  const [friendlyErrorTitle, setFriendlyErrorTitle] = useState('')
+  const [friendlyErrorMessage, setFriendlyErrorMessage] = useState('')
+  const [errorModalOpen, setErrorModalOpen] = useState(false)
+
+  const [aiExplaining, setAiExplaining] = useState(false)
+  const [aiReply, setAiReply] = useState('')
+  const [aiErr, setAiErr] = useState('')
+  const [manualExplainOpen, setManualExplainOpen] = useState(false)
+
   async function loadDep() {
     const p = getInjectedProvider()
     await requestAccounts(p)
@@ -113,12 +198,21 @@ export default function ActionSwap() {
     return { p, d }
   }
 
+  function showFriendlyError(raw: string) {
+    const mapped = mapFriendlySwapError(raw)
+    setTxErr(raw)
+    setFriendlyErrorTitle(mapped.title)
+    setFriendlyErrorMessage(mapped.message)
+    setErrorModalOpen(true)
+  }
+
   useEffect(() => {
     ;(async () => {
       try {
         await loadDep()
       } catch (e: any) {
-        setTxErr(e?.message || String(e))
+        const raw = e?.message || String(e)
+        showFriendlyError(raw)
       }
     })()
   }, [])
@@ -131,6 +225,12 @@ export default function ActionSwap() {
         setQuoteErr('')
         setTxMsg('')
         setTxErr('')
+        setFriendlyErrorTitle('')
+        setFriendlyErrorMessage('')
+        setErrorModalOpen(false)
+        setAiReply('')
+        setAiErr('')
+        setManualExplainOpen(false)
 
         const n = Number(amountIn)
         if (!Number.isFinite(n) || n <= 0) {
@@ -213,6 +313,121 @@ export default function ActionSwap() {
     return `${min.toFixed(4)} ${symbol}`
   }, [quote, effectiveSlippagePct, tokenOut])
 
+  useEffect(() => {
+    try {
+      const contextPayload = {
+        page: 'swap',
+        title: 'Swap',
+        path: window.location.pathname,
+        context: {
+          tokenIn,
+          tokenOut,
+          amountIn: Number(amountIn || '0'),
+          slippageMode,
+          slippageDisplay: presetToDisplay(slippageMode === 'custom' ? customSlippage : slippageMode),
+          effectiveSlippagePct,
+          bestRoute: quote?.bestRoute?.path?.join(' -> ') || '',
+          expectedOut: quote?.bestRoute?.expectedOut || '',
+          priceImpact: quote?.bestRoute?.priceImpact || '',
+          recommendedSlippage: quote?.bestRoute?.recommendedSlippage || '',
+          minimumReceived: displayMinReceived,
+          gasCostEth: quote?.bestRoute?.gasCostEth || '',
+          gasCostUsdApprox: quote?.bestRoute?.gasCostUsdApprox || '',
+          routeExplanation: quote?.bestRoute?.aiExplanation || '',
+          isExecutable,
+          quoteError: quoteErr || '',
+          txStatus: txErr ? 'failed' : txMsg ? 'success' : sending ? 'pending' : 'idle',
+          txError: txErr || '',
+          entryPointDepositIssue: isDepositIssue(txErr),
+          lastErrorFriendlyTitle: friendlyErrorTitle || '',
+          lastErrorFriendlyMessage: friendlyErrorMessage || ''
+        }
+      }
+
+      sessionStorage.setItem('wallet_ai_context', JSON.stringify(contextPayload))
+    } catch (e) {
+      console.error(e)
+    }
+  }, [
+    tokenIn,
+    tokenOut,
+    amountIn,
+    slippageMode,
+    customSlippage,
+    effectiveSlippagePct,
+    quote,
+    quoteErr,
+    displayMinReceived,
+    isExecutable,
+    txMsg,
+    txErr,
+    sending,
+    friendlyErrorTitle,
+    friendlyErrorMessage
+  ])
+
+  async function explainSwapWithAI(mode: 'manual' | 'error' = 'manual') {
+    if (!quote?.bestRoute && !txErr && !quoteErr) return
+
+    setAiErr('')
+    setAiExplaining(true)
+
+    try {
+      const context = {
+        tokenIn,
+        tokenOut,
+        amountIn: Number(amountIn || '0'),
+        slippageMode,
+        effectiveSlippagePct,
+        bestRoute: quote?.bestRoute?.path?.join(' -> ') || '',
+        expectedOut: quote?.bestRoute?.expectedOut || '',
+        priceImpact: quote?.bestRoute?.priceImpact || '',
+        recommendedSlippage: quote?.bestRoute?.recommendedSlippage || '',
+        minimumReceived: displayMinReceived,
+        gasCostEth: quote?.bestRoute?.gasCostEth || '',
+        gasCostUsdApprox: quote?.bestRoute?.gasCostUsdApprox || '',
+        routeExplanation: quote?.bestRoute?.aiExplanation || '',
+        isExecutable,
+        quoteError: quoteErr || '',
+        txStatus: txErr ? 'failed' : txMsg ? 'success' : sending ? 'pending' : 'idle',
+        txError: txErr || '',
+        entryPointDepositIssue: isDepositIssue(txErr),
+        lastErrorFriendlyTitle: friendlyErrorTitle || '',
+        lastErrorFriendlyMessage: friendlyErrorMessage || ''
+      }
+
+      let message =
+        'Please explain this swap quote in a gentle, beginner-friendly way. Explain why this route is selected, what price impact means, why the recommended slippage is set this way, what minimum received means, and what the user should pay attention to.'
+
+      if (mode === 'error' || txErr) {
+        message =
+          'Please explain this failed swap in a gentle, beginner-friendly way. Explain what likely went wrong, what the error means, and what the user should check next.'
+      }
+
+      const r = await fetch('http://127.0.0.1:8787/llm/chat', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          message,
+          page: 'swap',
+          context,
+          history: []
+        })
+      })
+
+      const j = await r.json()
+      if (!r.ok) throw new Error(j?.detail || j?.error || 'llm chat error')
+
+      setAiReply(j?.reply || '')
+      setManualExplainOpen(true)
+    } catch (e: any) {
+      setAiErr(e?.message || String(e))
+      setManualExplainOpen(true)
+    } finally {
+      setAiExplaining(false)
+    }
+  }
+
   async function runUserOp(params: {
     provider: ethers.providers.Web3Provider
     entryPoint: string
@@ -252,6 +467,12 @@ export default function ActionSwap() {
   async function swap() {
     setTxMsg('')
     setTxErr('')
+    setFriendlyErrorTitle('')
+    setFriendlyErrorMessage('')
+    setErrorModalOpen(false)
+    setAiReply('')
+    setAiErr('')
+    setManualExplainOpen(false)
     setSending(true)
 
     try {
@@ -276,7 +497,6 @@ export default function ActionSwap() {
       const execIface = new ethers.utils.Interface(EXEC_ABI)
       const routerIface = new ethers.utils.Interface(ROUTER_ABI)
 
-      // ETH -> token
       if (tokenIn === 'ETH') {
         const value = ethers.utils.parseEther(amountIn)
         if (value.lte(0)) throw new Error('Amount must be > 0')
@@ -306,16 +526,26 @@ export default function ActionSwap() {
           result?.receipt?.transactionHash ||
           result?.receipt?.hash ||
           'submitted'
+        
+        //添加交易记录
+        appendHistory({
+          id: Date.now().toString(),
+          type: 'swap',
+          time: Date.now(),
+          tokenIn,
+          tokenOut,
+          amountIn,
+          amountOut: quote?.bestRoute?.expectedOut,
+          txHash: txHash
+        })
 
         setTxMsg(`Swap success. tx=${txHash}`)
       } else {
-        // token -> token
         const amountInWei = ethers.utils.parseEther(amountIn)
         if (amountInWei.lte(0)) throw new Error('Amount must be > 0')
 
         const tokenInAddr = symbolToAddress(tokenIn, d)
 
-        // 1) approve(router, amount)
         const tokenIface = new ethers.utils.Interface(ERC20_ABI)
         const approveData = tokenIface.encodeFunctionData('approve', [router, amountInWei])
 
@@ -333,7 +563,6 @@ export default function ActionSwap() {
           callData: approveCallData,
         })
 
-        // 2) swapExactTokensForTokens(amountIn, amountOutMin, path, diamondAccount)
         const swapData = routerIface.encodeFunctionData('swapExactTokensForTokens', [
           amountInWei,
           amountOutMin,
@@ -365,7 +594,8 @@ export default function ActionSwap() {
 
       window.dispatchEvent(new Event('wallet-refresh'))
     } catch (e: any) {
-      setTxErr(e?.shortMessage || e?.reason || e?.message || String(e))
+      const raw = e?.shortMessage || e?.reason || e?.message || String(e)
+      showFriendlyError(raw)
     } finally {
       setSending(false)
     }
@@ -373,6 +603,93 @@ export default function ActionSwap() {
 
   return (
     <Layout title='Swap'>
+      {errorModalOpen && (
+        <div
+          style={{
+            position: 'fixed',
+            inset: 0,
+            background: 'rgba(0,0,0,.45)',
+            zIndex: 80,
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            padding: 20
+          }}
+        >
+          <div
+            className='card'
+            style={{
+              width: 'min(520px, 100%)',
+              padding: 18,
+              borderColor: 'rgba(255,77,90,.25)',
+              boxShadow: '0 24px 80px rgba(0,0,0,.35)'
+            }}
+          >
+            <div
+              className='row'
+              style={{ justifyContent: 'space-between', alignItems: 'center', gap: 12 }}
+            >
+              <div className='h2' style={{ color: 'rgba(255,220,220,.96)' }}>
+                {friendlyErrorTitle || 'Swap failed'}
+              </div>
+
+              <button
+                className='btn btnGhost'
+                onClick={() => setErrorModalOpen(false)}
+              >
+                Close
+              </button>
+            </div>
+
+            <div
+              className='small'
+              style={{
+                marginTop: 12,
+                lineHeight: 1.7,
+                whiteSpace: 'pre-wrap',
+                opacity: 0.92
+              }}
+            >
+              {friendlyErrorMessage}
+            </div>
+
+            {txErr && (
+              <div
+                className='small'
+                style={{
+                  marginTop: 14,
+                  opacity: 0.68,
+                  whiteSpace: 'pre-wrap'
+                }}
+              >
+                Raw error: {shortenError(txErr)}
+              </div>
+            )}
+
+            <div style={{ marginTop: 16, display: 'flex', gap: 10 }}>
+              <button
+                className='btn btnGhost'
+                style={{ flex: 1 }}
+                onClick={async () => {
+                  setErrorModalOpen(false)
+                  await explainSwapWithAI('error')
+                }}
+              >
+                Explain this error with AI
+              </button>
+
+              <button
+                className='btn btnPrimary'
+                style={{ flex: 1 }}
+                onClick={() => setErrorModalOpen(false)}
+              >
+                Got it
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
       <div className='card' style={{ padding: 16 }}>
         <div className='row' style={{ justifyContent: 'space-between', alignItems: 'center' }}>
           <div className='h2'>Swap</div>
@@ -448,7 +765,7 @@ export default function ActionSwap() {
 
           {quoteLoading ? (
             <div className='small' style={{ marginTop: 8 }}>
-              正在分析最优路径、滑点与 gas 成本...
+              Analyzing optimal path, slippage, and gas costs...
             </div>
           ) : quoteErr ? (
             <div className='small' style={{ marginTop: 8, color: 'rgba(255,77,90,.9)' }}>
@@ -469,6 +786,37 @@ export default function ActionSwap() {
               <div className='small' style={{ marginTop: 8 }}>
                 {quote.bestRoute.aiExplanation}
               </div>
+
+              <div style={{ marginTop: 12 }}>
+                <button
+                  className='btn btnGhost'
+                  onClick={() => explainSwapWithAI('manual')}
+                  disabled={aiExplaining}
+                >
+                  {aiExplaining ? 'Explaining…' : 'Explain this route with AI'}
+                </button>
+              </div>
+
+              {manualExplainOpen && aiReply && !txErr && (
+                <div
+                  className='small'
+                  style={{
+                    marginTop: 12,
+                    opacity: 0.92,
+                    lineHeight: 1.6,
+                    whiteSpace: 'pre-wrap'
+                  }}
+                >
+                  <div style={{ marginBottom: 6, fontWeight: 700 }}>AI Explanation</div>
+                  <div>{aiReply}</div>
+                </div>
+              )}
+
+              {aiErr && !txErr && (
+                <div style={{ marginTop: 10, color: 'rgba(255,77,90,.9)' }}>
+                  AI explain error: {aiErr}
+                </div>
+              )}
             </>
           ) : (
             <div className='small' style={{ marginTop: 8 }}>
@@ -479,10 +827,10 @@ export default function ActionSwap() {
 
         <div className='small' style={{ marginTop: 12, opacity: 0.85 }}>
           {tokenIn === 'ETH'
-            ? '当前组合支持真实 ETH-origin AA swap（Router 内部会自动 wrap ETH -> WETH）。'
+            ? 'This pair supports real ETH-origin AA swaps (the router will automatically wrap ETH to WETH).'
             : isExecutable
-            ? '当前组合支持真实 token-to-token AA swap（会先通过 AA 执行 approve，再执行 swap）。'
-            : '当前页面已支持该组合的 AI quote 展示；真实执行下一步可继续扩展 token-to-ETH。'}
+            ? 'This pair supports real token-to-token AA swaps (the wallet will execute approve first, then perform the swap).'
+            : 'This pair currently supports AI quote analysis only. Real execution can be extended to token-to-ETH swaps in future versions.'}
         </div>
 
         <div className='col g12' style={{ marginTop: 14 }}>
@@ -503,6 +851,27 @@ export default function ActionSwap() {
           {txErr && (
             <div style={{ marginTop: 10, color: 'rgba(255,77,90,.9)' }}>
               {txErr}
+            </div>
+          )}
+
+          {txErr && manualExplainOpen && aiReply && (
+            <div
+              className='small'
+              style={{
+                marginTop: 12,
+                opacity: 0.92,
+                lineHeight: 1.6,
+                whiteSpace: 'pre-wrap'
+              }}
+            >
+              <div style={{ marginBottom: 6, fontWeight: 700 }}>AI Explanation</div>
+              <div>{aiReply}</div>
+            </div>
+          )}
+
+          {txErr && aiErr && (
+            <div style={{ marginTop: 10, color: 'rgba(255,77,90,.9)' }}>
+              AI explain error: {aiErr}
             </div>
           )}
 

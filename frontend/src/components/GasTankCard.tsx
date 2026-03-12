@@ -179,7 +179,7 @@ export default function GasTankCard({ diamondAccount }: Props) {
 
         {err ? <div className='errorBox'>Error: {err}</div> : null}
         <div className='hint'>
-          说明：这是把 <b>msg.value</b> 充值到 <b>EntryPoint.deposit</b>（Gas Tank），用于后续 AA 的 handleOps 结算；不是给合约地址普通转账。
+          Note: The ETH you send will be deposited into the <b>EntryPoint.deposit</b>（Gas Tank） to cover future AA <b>msg.value</b> gas costs. This is not a normal transfer to the contract address.
         </div>
       </div>
     </div>
