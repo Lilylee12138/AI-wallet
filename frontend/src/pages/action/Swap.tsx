@@ -528,16 +528,21 @@ export default function ActionSwap() {
           'submitted'
         
         //添加交易记录
-        appendHistory({
-          id: Date.now().toString(),
-          type: 'swap',
-          time: Date.now(),
-          tokenIn,
-          tokenOut,
-          amountIn,
-          amountOut: quote?.bestRoute?.expectedOut,
-          txHash: txHash
-        })
+        const chainId = await getChainId(p)
+        appendHistory(
+          chainId,
+          d.diamondAccount,
+          {
+            id: Date.now().toString(),
+            type: 'swap',
+            time: Date.now(),
+            tokenIn,
+            tokenOut,
+            amountIn,
+            amountOut: quote?.bestRoute?.expectedOut,
+            txHash
+          }
+        )
 
         setTxMsg(`Swap success. tx=${txHash}`)
       } else {

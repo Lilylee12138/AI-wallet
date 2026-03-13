@@ -1,6 +1,6 @@
 import Layout from '../components/Layout'
 import { useNavigate, useLocation } from 'react-router-dom'
-import { useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import { getInjectedProvider, requestAccounts, getChainId } from '../lib/eth'
 import { setAuthed } from '../lib/auth'
 
@@ -19,7 +19,7 @@ export default function Auth() {
       const p = getInjectedProvider()
       await requestAccounts(p)
       const chainId = await getChainId(p)
-      // 真实可用：记录 mode + chainId，后续你可加 address / sessionNonce 等
+      // 真实可用：记录 mode + chainId，后续可加 address / sessionNonce 等
       setAuthed('eoa', { chainId })
       nav(redirectTo, { replace: true })
     } catch (e: any) {
@@ -30,23 +30,55 @@ export default function Auth() {
   }
 
   async function loginPasskey() {
-    // 目前先做 UI/入口占位：后续你会接 WebAuthn + IdentityFacet session
+    // 目前先做 UI/入口占位：后续会接 WebAuthn + IdentityFacet session
     setAuthed('passkey', { note: 'TODO: integrate WebAuthn session' })
     nav(redirectTo, { replace: true })
   }
 
   async function loginOAuth(provider: 'google' | 'apple') {
-    // 目前先做 UI/入口占位：后续你会接 OAuth issuer + session attest
+    // 目前先做 UI/入口占位：后续会接 OAuth issuer + session attest
     setAuthed('oauth', { provider, note: 'TODO: integrate OAuth issuer session' })
     nav(redirectTo, { replace: true })
   }
+
+  const pageContext = useMemo(() => {
+    return {
+      path: window.location.pathname,
+      page: 'auth',
+      title: 'AI Wallet',
+      context: {
+        pageTitle: 'Welcome back',
+        loginStage: 'development',
+        activeMethod: 'EOA',
+        availableMethods: ['EOA', 'Passkey', 'Google OAuth', 'Apple OAuth'],
+        eoaEnabled: true,
+        passkeyStatus: 'placeholder',
+        googleOAuthStatus: 'placeholder',
+        appleOAuthStatus: 'placeholder',
+        identityLayer: 'IdentityFacet planned',
+        redirectTo,
+        busy,
+        error: err || '',
+        helperText:
+          'EOA is currently available for real connection. Passkey and OAuth are placeholders and will be integrated with IdentityFacet later.'
+      }
+    }
+  }, [redirectTo, busy, err])
+
+  useEffect(() => {
+    try {
+      sessionStorage.setItem('wallet_ai_context', JSON.stringify(pageContext))
+    } catch (e) {
+      console.error(e)
+    }
+  }, [pageContext])
 
   return (
     <Layout title='AI Wallet'>
       <div className='card' style={{ padding: 16 }}>
         <div className='h2'>Welcome back</div>
         <div className='small' style={{ marginTop: 8 }}>
-          请选择一种方式登录。开发阶段：EOA 可真实连接；Passkey/OAuth 为占位，后续接 IdentityFacet。
+          Please choose a login method. Currently, EOA login is available. Passkey and OAuth are placeholders and will be integrated with IdentityFacet later.
         </div>
 
         {err && (
@@ -74,12 +106,7 @@ export default function Auth() {
             </button>
           </div>
 
-          <div className='cardSoft' style={{ padding: 12 }}>
-            <div className='small'>AI Assistant（预留）</div>
-            <div className='small'>
-              后续：在登录阶段解释 Passkey / OAuth 安全模型、会话有效期、风险提示。
-            </div>
-          </div>
+          
         </div>
       </div>
     </Layout>

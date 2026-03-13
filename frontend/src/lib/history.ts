@@ -10,11 +10,13 @@ export type HistoryItem = {
   txHash?: string
 }
 
-const KEY = 'wallet_history'
+function makeKey(chainId: number | string, walletAddress: string) {
+  return `wallet_history_${chainId}_${String(walletAddress).toLowerCase()}`
+}
 
-export function getHistory(): HistoryItem[] {
+export function getHistory(chainId: number | string, walletAddress: string): HistoryItem[] {
   try {
-    const raw = localStorage.getItem(KEY)
+    const raw = localStorage.getItem(makeKey(chainId, walletAddress))
     if (!raw) return []
     return JSON.parse(raw)
   } catch {
@@ -22,17 +24,18 @@ export function getHistory(): HistoryItem[] {
   }
 }
 
-export function appendHistory(item: HistoryItem) {
-  const list = getHistory()
-
+export function appendHistory(
+  chainId: number | string,
+  walletAddress: string,
+  item: HistoryItem
+) {
+  const list = getHistory(chainId, walletAddress)
   list.unshift(item)
 
-  // 只保留最近 20 条
   const trimmed = list.slice(0, 20)
-
-  localStorage.setItem(KEY, JSON.stringify(trimmed))
+  localStorage.setItem(makeKey(chainId, walletAddress), JSON.stringify(trimmed))
 }
 
-export function clearHistory() {
-  localStorage.removeItem(KEY)
+export function clearHistory(chainId: number | string, walletAddress: string) {
+  localStorage.removeItem(makeKey(chainId, walletAddress))
 }

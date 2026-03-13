@@ -1,7 +1,9 @@
 import Layout from '../components/Layout'
 import { useNavigate } from 'react-router-dom'
 import { useEffect, useMemo, useState } from 'react'
-import { getHistory } from '../lib/history'
+import { getHistory, type HistoryItem } from '../lib/history'
+import { getInjectedProvider, requestAccounts, getChainId } from '../lib/eth'
+import { loadDeployments } from '../config/deployments'
 
 type SwapQuoteResponse = {
   bestRoute: {
@@ -18,16 +20,30 @@ export default function Trade() {
   const [quote, setQuote] = useState<SwapQuoteResponse | null>(null)
   const [loading, setLoading] = useState(true)
   const [err, setErr] = useState('')
-  const [history, setHistory] = useState<any[]>([])
+  const [history, setHistory] = useState<HistoryItem[]>([])
+
+  async function loadWalletHistory() {
+    try {
+      const p = getInjectedProvider()
+      await requestAccounts(p)
+
+      const chainId = await getChainId(p)
+      const dep = await loadDeployments(chainId)
+
+      setHistory(getHistory(chainId, dep.diamondAccount))
+    } catch (e) {
+      console.error('Failed to load history', e)
+      setHistory([])
+    }
+  }
 
   useEffect(() => {
-    // 先加载本地交易历史
-    setHistory(getHistory())
-    
     let alive = true
 
     ;(async () => {
       try {
+        await loadWalletHistory()
+
         setLoading(true)
         setErr('')
 
@@ -51,6 +67,7 @@ export default function Trade() {
         setQuote(data)
       } catch (e: any) {
         if (!alive) return
+        console.error('Failed to load trade quote', e)
         setErr(e?.message || String(e))
       } finally {
         if (!alive) return
@@ -60,6 +77,20 @@ export default function Trade() {
 
     return () => {
       alive = false
+    }
+  }, [])
+
+  useEffect(() => {
+    const refreshHistory = async () => {
+      await loadWalletHistory()
+    }
+
+    window.addEventListener('focus', refreshHistory)
+    window.addEventListener('wallet-refresh', refreshHistory as EventListener)
+
+    return () => {
+      window.removeEventListener('focus', refreshHistory)
+      window.removeEventListener('wallet-refresh', refreshHistory as EventListener)
     }
   }, [])
 
@@ -76,8 +107,12 @@ export default function Trade() {
   }, [loading, err, quote])
 
   const assistantText = useMemo(() => {
-    if (loading) return 'AI is analyzing the current network conditions and transaction environment...'
-    if (err) return 'AI is currently unable to retrieve on-chain quote data. Please try again later.'
+    if (loading) {
+      return 'AI is analyzing the current network conditions and transaction environment...'
+    }
+    if (err) {
+      return 'AI is currently unable to retrieve on-chain quote data. Please try again later.'
+    }
     return 'AI has completed the transaction environment analysis. Navigate to the Send or Swap page to view detailed costs, paths, and recommendations for each operation.'
   }, [loading, err])
 
@@ -122,24 +157,24 @@ export default function Trade() {
         </div>
       </div>
 
-      <div className="card">
-        <div className="h2">History</div>
+      <div className='card'>
+        <div className='h2'>History</div>
 
         {history.length === 0 && (
-          <div className="small" style={{ marginTop: 8 }}>
+          <div className='small' style={{ marginTop: 8 }}>
             No recent activity
           </div>
         )}
 
-        {history.slice(0,5).map((h, i) => (
+        {history.slice(0, 5).map((h, i) => (
           <div key={i} style={{ marginTop: 12 }}>
             {h.type === 'swap' && (
-            <>
-              <div className="small" style={{ fontWeight: 600 }}>
-                {i + 1}. Swap {h.tokenIn} → {h.tokenOut}
-              </div>
+              <>
+                <div className='small' style={{ fontWeight: 600 }}>
+                  {i + 1}. Swap {h.tokenIn} → {h.tokenOut}
+                </div>
 
-                <div className="small">
+                <div className='small'>
                   {h.amountIn} → {h.amountOut}
                 </div>
               </>
@@ -147,20 +182,19 @@ export default function Trade() {
 
             {h.type === 'transfer' && (
               <>
-                <div className="small" style={{ fontWeight: 600 }}>
+                <div className='small' style={{ fontWeight: 600 }}>
                   {i + 1}. Send {h.tokenIn}
                 </div>
 
-                <div className="small">
-                  {h.amountIn} to {h.to?.slice(0,6)}...
+                <div className='small'>
+                  {h.amountIn} to {h.to?.slice(0, 6)}...
                 </div>
               </>
             )}
 
-            <div className="small" style={{ opacity: 0.7 }}>
+            <div className='small' style={{ opacity: 0.7 }}>
               {new Date(h.time).toLocaleTimeString()}
             </div>
-
           </div>
         ))}
       </div>

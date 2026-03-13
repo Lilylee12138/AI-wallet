@@ -388,15 +388,21 @@ export default function ActionTransfer() {
       const txHash = (receipt as any)?.transactionHash || ''
 
       // 加历史记录
-      appendHistory({
-        id: Date.now().toString(),
-        type: 'transfer',
-        time: Date.now(),
-        tokenIn: 'ETH',
-        amountIn: amt,
-        to: recipient,
-        txHash
-      })
+      const chainId = await getChainId(p)
+
+      appendHistory(
+        chainId,
+        d.diamondAccount,
+        {
+          id: Date.now().toString(),
+          type: 'transfer',
+          time: Date.now(),
+          tokenIn: 'ETH',
+          amountIn: amt,
+          to: recipient,
+          txHash
+        }
+      )
 
       setTxMsg(`Sent successfully. tx=${txHash}`)
 
