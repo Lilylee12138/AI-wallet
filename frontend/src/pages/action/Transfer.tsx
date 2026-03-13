@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { ethers } from 'ethers'
 import Layout from '../../components/Layout'
 import { useNavigate } from 'react-router-dom'
@@ -9,6 +9,21 @@ import { loadDeployments } from '../../config/deployments'
 import { buildUserOp, sendUserOp, signUserOpEOA_v2 } from '../../lib/aa'
 
 const EXEC_ABI = ['function execute(address target,uint256 value,bytes data) returns (bytes)']
+
+type ZslRiskReview = {
+  riskCategory: string
+  warnUser: boolean
+  confidence: string
+  title: string
+  explanation: string
+  advice: string
+  model?: string
+}
+
+type PendingZslConfirm = {
+  to: string
+  amt: string
+}
 
 function hasWarningHint(reason: string) {
   return (
@@ -49,7 +64,7 @@ function mapFriendlyTransferError(raw: string) {
     return {
       title: 'Transfer rejected by risk protection',
       message:
-        'This transfer was blocked by the wallet risk protection logic. The system believes the transaction may be unsafe, so it was rejected before execution.'
+        'This transfer was blocked by the wallet risk protection logic. The oracle, attestation, or user signature verification did not pass.'
     }
   }
 
@@ -123,6 +138,11 @@ export default function ActionTransfer() {
   const [manualExplainOpen, setManualExplainOpen] = useState(false)
   const [autoExplained, setAutoExplained] = useState(false)
 
+  const [zslReview, setZslReview] = useState<ZslRiskReview | null>(null)
+  const [zslModalOpen, setZslModalOpen] = useState(false)
+  const [zslReviewing, setZslReviewing] = useState(false)
+  const pendingZslConfirmRef = useRef<PendingZslConfirm | null>(null)
+
   const riskThresholdBps = Number(import.meta.env.VITE_RISK_THRESHOLD_BPS || 7000)
 
   async function loadDep() {
@@ -176,8 +196,33 @@ export default function ActionTransfer() {
     }
   }
 
+  async function fetchZslRiskReview(params: {
+    recipient: string
+    amountEth: number
+    riskScoreBps: number
+    riskReason: string
+    riskThresholdBps: number
+    gasGwei?: number
+    maxFeeGwei?: number
+    maxPriorityFeeGwei?: number
+  }) {
+    const r = await fetch('http://127.0.0.1:8787/llm/zsl-risk-review', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        page: 'transfer',
+        ...params
+      })
+    })
+
+    const j = await r.json()
+    if (!r.ok) throw new Error(j?.detail || j?.error || 'zsl risk review error')
+
+    return j as ZslRiskReview
+  }
+
   async function explainTransferWithAI(mode: 'auto' | 'manual' = 'manual') {
-    if (riskScore === null && !txErr) return
+    if (riskScore === null && !txErr && !zslReview) return
 
     setAiErr('')
     setAiExplaining(true)
@@ -195,7 +240,12 @@ export default function ActionTransfer() {
         rejectedByRiskOracle: isRiskRejected(txErr),
         riskThresholdBps,
         lastErrorFriendlyTitle: friendlyErrorTitle || '',
-        lastErrorFriendlyMessage: friendlyErrorMessage || ''
+        lastErrorFriendlyMessage: friendlyErrorMessage || '',
+        zslWarnUser: zslReview?.warnUser ?? false,
+        zslRiskCategory: zslReview?.riskCategory || '',
+        zslTitle: zslReview?.title || '',
+        zslExplanation: zslReview?.explanation || '',
+        zslAdvice: zslReview?.advice || ''
       }
 
       let message =
@@ -207,6 +257,9 @@ export default function ActionTransfer() {
       } else if ((riskScore ?? 0) >= riskThresholdBps || riskReason.includes('rule:blacklist') || isRiskRejected(txErr)) {
         message =
           'Please explain this high-risk or rejected transfer in a gentle, beginner-friendly way. Explain what the risk score means, why this transfer was blocked or considered dangerous, and what the user should do next.'
+      } else if (zslReview?.warnUser) {
+        message =
+          'Please explain this AI soft warning in a gentle, beginner-friendly way. Explain that the hard risk model did not block the transaction, but the zero-shot AI review still noticed a suspicious pattern. Make clear that the user may continue after checking the recipient and amount carefully.'
       } else if (txErr) {
         message =
           'Please explain this failed transfer in a gentle, beginner-friendly way. Explain what likely went wrong and what the user should check next.'
@@ -253,10 +306,11 @@ export default function ActionTransfer() {
 
     return (
       hasWarningHint(riskReason) ||
+      !!zslReview?.warnUser ||
       ((riskScore ?? 0) > 0 && !txMsg) ||
       !!txErr
     )
-  }, [autoExplain, riskReason, riskScore, txErr, txMsg])
+  }, [autoExplain, riskReason, riskScore, txErr, txMsg, zslReview])
 
   const showExplainSection = autoExplain || manualExplainOpen
 
@@ -289,7 +343,12 @@ export default function ActionTransfer() {
           rejectedByRiskOracle: isRiskRejected(txErr),
           riskThresholdBps,
           lastErrorFriendlyTitle: friendlyErrorTitle || '',
-          lastErrorFriendlyMessage: friendlyErrorMessage || ''
+          lastErrorFriendlyMessage: friendlyErrorMessage || '',
+          zslWarnUser: zslReview?.warnUser ?? false,
+          zslRiskCategory: zslReview?.riskCategory || '',
+          zslTitle: zslReview?.title || '',
+          zslExplanation: zslReview?.explanation || '',
+          zslAdvice: zslReview?.advice || ''
         }
       }
 
@@ -308,8 +367,163 @@ export default function ActionTransfer() {
     sending,
     riskThresholdBps,
     friendlyErrorTitle,
-    friendlyErrorMessage
+    friendlyErrorMessage,
+    zslReview
   ])
+
+  async function executeTransfer(opts?: {
+    overrideTo?: string
+    overrideAmt?: string
+    skipZsl?: boolean
+  }) {
+    const recipientInput = (opts?.overrideTo ?? to).trim()
+    const amountInput = (opts?.overrideAmt ?? amt).trim()
+    const skipZsl = !!opts?.skipZsl
+
+    const { p, d } = await loadDep()
+
+    if (!recipientInput) throw new Error('Recipient is required')
+    const recipient = ethers.utils.getAddress(recipientInput)
+
+    const value = ethers.utils.parseEther((amountInput || '0').trim())
+    if (value.lte(0)) throw new Error('Amount must be > 0')
+
+    const accounts = await p.listAccounts()
+    if (!accounts.length) throw new Error('MetaMask not connected')
+    const beneficiary = accounts[0]
+
+    const execIface = new ethers.utils.Interface(EXEC_ABI)
+    const callData = execIface.encodeFunctionData('execute', [recipient, value, '0x'])
+
+    const { userOp, userOpHash } = await buildUserOp({
+      provider: p,
+      entryPoint: d.entryPoint,
+      diamond: d.diamondAccount,
+      callData
+    })
+
+    const fee = await p.getFeeData()
+    const maxFee = fee.maxFeePerGas ?? fee.gasPrice
+    const maxPrio = fee.maxPriorityFeePerGas ?? null
+
+    const maxFeeGwei = maxFee ? Number(ethers.utils.formatUnits(maxFee, 'gwei')) : undefined
+    const maxPriorityFeeGwei = maxPrio ? Number(ethers.utils.formatUnits(maxPrio, 'gwei')) : undefined
+    const gasGwei = maxFeeGwei
+
+    const risk = await fetchRisk({
+      diamond: d.diamondAccount,
+      userOpHash,
+      to: recipient,
+      valueEth: Number(amountInput || '0'),
+      gasGwei,
+      maxFeeGwei,
+      maxPriorityFeeGwei
+    })
+
+    setRiskScore(risk.attestation.riskScoreBps)
+    setRiskReason(risk.reason || '')
+    setLastRiskAmount(amountInput || '0')
+
+    const hardRisk =
+      risk.attestation.riskScoreBps >= riskThresholdBps ||
+      (risk.reason || '').includes('rule:blacklist')
+
+    if (!hardRisk && !skipZsl) {
+      setZslReviewing(true)
+
+      try {
+        const zsl = await fetchZslRiskReview({
+          recipient,
+          amountEth: Number(amountInput || '0'),
+          riskScoreBps: risk.attestation.riskScoreBps,
+          riskReason: risk.reason || '',
+          riskThresholdBps,
+          gasGwei,
+          maxFeeGwei,
+          maxPriorityFeeGwei
+        })
+
+        setZslReview(zsl)
+
+        if (zsl.warnUser) {
+          pendingZslConfirmRef.current = {
+            to: recipientInput,
+            amt: amountInput
+          }
+          setZslModalOpen(true)
+          return
+        }
+      } finally {
+        setZslReviewing(false)
+      }
+    }
+
+    const signedUserOp = {
+      ...userOp,
+      signature: await signUserOpEOA_v2({
+        provider: p,
+        userOpHash,
+        attestation: risk.attestation,
+        oracleSig: risk.oracleSig
+      })
+    }
+
+    const result = await sendUserOp({
+      provider: p,
+      entryPoint: d.entryPoint,
+      beneficiary,
+      userOp: signedUserOp
+    })
+
+    const receipt = (result as any)?.receipt || result
+    const txHash = (receipt as any)?.transactionHash || ''
+
+    const chainId = await getChainId(p)
+
+    appendHistory(
+      chainId,
+      d.diamondAccount,
+      {
+        id: Date.now().toString(),
+        type: 'transfer',
+        time: Date.now(),
+        tokenIn: 'ETH',
+        amountIn: amountInput,
+        to: recipient,
+        txHash
+      }
+    )
+
+    setTxMsg(`Sent successfully. tx=${txHash}`)
+  }
+
+  async function continueAfterZslWarning() {
+    const pending = pendingZslConfirmRef.current
+    if (!pending) return
+
+    setZslModalOpen(false)
+    setSending(true)
+
+    try {
+      await executeTransfer({
+        overrideTo: pending.to,
+        overrideAmt: pending.amt,
+        skipZsl: true
+      })
+      pendingZslConfirmRef.current = null
+    } catch (e: any) {
+      const msg = e?.shortMessage || e?.reason || e?.message || String(e)
+
+      if (String(msg).includes('AA24')) {
+        showFriendlyError('Rejected by RiskOracle: attestation or signature verification failed (AA24)')
+      } else {
+        showFriendlyError(msg)
+      }
+    } finally {
+      setSending(false)
+      setZslReviewing(false)
+    }
+  }
 
   async function send() {
     setTxMsg('')
@@ -324,99 +538,24 @@ export default function ActionTransfer() {
     setLastRiskAmount('')
     setManualExplainOpen(false)
     setAutoExplained(false)
+    setZslReview(null)
+    setZslModalOpen(false)
+    pendingZslConfirmRef.current = null
     setSending(true)
 
     try {
-      const { p, d } = await loadDep()
-
-      if (!to) throw new Error('Recipient is required')
-      const recipient = ethers.utils.getAddress(to.trim())
-
-      const value = ethers.utils.parseEther((amt || '0').trim())
-      if (value.lte(0)) throw new Error('Amount must be > 0')
-
-      const accounts = await p.listAccounts()
-      if (!accounts.length) throw new Error('MetaMask not connected')
-      const beneficiary = accounts[0]
-
-      const execIface = new ethers.utils.Interface(EXEC_ABI)
-      const callData = execIface.encodeFunctionData('execute', [recipient, value, '0x'])
-
-      const { userOp, userOpHash } = await buildUserOp({
-        provider: p,
-        entryPoint: d.entryPoint,
-        diamond: d.diamondAccount,
-        callData
-      })
-
-      const fee = await p.getFeeData()
-      const maxFee = fee.maxFeePerGas ?? fee.gasPrice
-      const maxPrio = fee.maxPriorityFeePerGas ?? null
-
-      const maxFeeGwei = maxFee ? Number(ethers.utils.formatUnits(maxFee, 'gwei')) : undefined
-      const maxPriorityFeeGwei = maxPrio ? Number(ethers.utils.formatUnits(maxPrio, 'gwei')) : undefined
-      const gasGwei = maxFeeGwei
-
-      const risk = await fetchRisk({
-        diamond: d.diamondAccount,
-        userOpHash,
-        to: recipient,
-        valueEth: Number(amt || '0'),
-        gasGwei,
-        maxFeeGwei,
-        maxPriorityFeeGwei
-      })
-
-      setRiskScore(risk.attestation.riskScoreBps)
-      setRiskReason(risk.reason || '')
-      setLastRiskAmount(amt || '0')
-
-      userOp.signature = await signUserOpEOA_v2({
-        provider: p,
-        userOpHash,
-        attestation: risk.attestation,
-        oracleSig: risk.oracleSig
-      })
-
-      const receipt = await sendUserOp({
-        provider: p,
-        entryPoint: d.entryPoint,
-        beneficiary,
-        userOp
-      })
-
-      const txHash = (receipt as any)?.transactionHash || ''
-
-      // 加历史记录
-      const chainId = await getChainId(p)
-
-      appendHistory(
-        chainId,
-        d.diamondAccount,
-        {
-          id: Date.now().toString(),
-          type: 'transfer',
-          time: Date.now(),
-          tokenIn: 'ETH',
-          amountIn: amt,
-          to: recipient,
-          txHash
-        }
-      )
-
-      setTxMsg(`Sent successfully. tx=${txHash}`)
-
-
+      await executeTransfer()
     } catch (e: any) {
       const msg = e?.shortMessage || e?.reason || e?.message || String(e)
 
       if (String(msg).includes('AA24')) {
-        showFriendlyError('Rejected by RiskOracle: risk score too high (AA24 signature error)')
+        showFriendlyError('Rejected by RiskOracle: attestation or signature verification failed (AA24)')
       } else {
         showFriendlyError(msg)
       }
     } finally {
       setSending(false)
+      setZslReviewing(false)
     }
   }
 
@@ -510,6 +649,99 @@ export default function ActionTransfer() {
         </div>
       )}
 
+      {zslModalOpen && zslReview && (
+        <div
+          style={{
+            position: 'fixed',
+            inset: 0,
+            background: 'rgba(0,0,0,.45)',
+            zIndex: 85,
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            padding: 20
+          }}
+        >
+          <div
+            className='card'
+            style={{
+              width: 'min(560px, 100%)',
+              padding: 18,
+              borderColor: 'rgba(255,190,90,.25)',
+              boxShadow: '0 24px 80px rgba(0,0,0,.35)'
+            }}
+          >
+            <div
+              className='row'
+              style={{ justifyContent: 'space-between', alignItems: 'center', gap: 12 }}
+            >
+              <div className='h2' style={{ color: 'rgba(255,235,210,.96)' }}>
+                {zslReview.title || 'Potential risk detected'}
+              </div>
+
+              <button
+                className='btn btnGhost'
+                onClick={() => {
+                  setZslModalOpen(false)
+                  pendingZslConfirmRef.current = null
+                }}
+              >
+                Close
+              </button>
+            </div>
+
+            <div
+              className='small'
+              style={{
+                marginTop: 12,
+                lineHeight: 1.7,
+                whiteSpace: 'pre-wrap',
+                opacity: 0.92
+              }}
+            >
+              {zslReview.explanation}
+            </div>
+
+            <div
+              className='small'
+              style={{
+                marginTop: 12,
+                lineHeight: 1.7,
+                whiteSpace: 'pre-wrap',
+                opacity: 0.82
+              }}
+            >
+              Risk category: {zslReview.riskCategory}
+              <br />
+              Confidence: {zslReview.confidence}
+              <br />
+              Advice: {zslReview.advice}
+            </div>
+
+            <div style={{ marginTop: 16, display: 'flex', gap: 10 }}>
+              <button
+                className='btn btnGhost'
+                style={{ flex: 1 }}
+                onClick={() => {
+                  setZslModalOpen(false)
+                  pendingZslConfirmRef.current = null
+                }}
+              >
+                Cancel
+              </button>
+
+              <button
+                className='btn btnPrimary'
+                style={{ flex: 1 }}
+                onClick={continueAfterZslWarning}
+              >
+                Continue anyway
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
       <div className='card' style={{ padding: 16 }}>
         <div className='h2'>Transfer (AA)</div>
         <div className='small' style={{ marginTop: 8 }}>
@@ -525,8 +757,8 @@ export default function ActionTransfer() {
           />
           <input className='input' placeholder='Amount (ETH)' value={amt} onChange={(e) => setAmt(e.target.value)} />
 
-          <button className='btn btnPrimary' disabled={sending || !dep} onClick={send}>
-            {sending ? 'Sending…' : 'Send (AA UserOp)'}
+          <button className='btn btnPrimary' disabled={sending || zslReviewing || !dep} onClick={send}>
+            {sending ? 'Sending…' : zslReviewing ? 'Reviewing…' : 'Send (AA UserOp)'}
           </button>
 
           {riskScore !== null && (
