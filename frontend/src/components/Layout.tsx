@@ -2,7 +2,14 @@ import type { ReactNode } from 'react'
 import BottomNav from './BottomNav'
 import ChatbotButton from './ChatbotButton'
 
-export default function Layout(props: { title: string; right?: ReactNode; children: ReactNode }) {
+type LayoutProps = {
+  title: string
+  right?: ReactNode
+  children: ReactNode
+  hideNav?: boolean
+}
+
+export default function Layout(props: LayoutProps) {
   return (
     <div className='shell'>
       <div className='topbar'>
@@ -18,7 +25,7 @@ export default function Layout(props: { title: string; right?: ReactNode; childr
 
       {props.children}
 
-      <BottomNav />
+      {!props.hideNav && <BottomNav />}
       <ChatbotButton />
     </div>
   )

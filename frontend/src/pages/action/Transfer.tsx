@@ -112,6 +112,33 @@ function shortenError(raw: string) {
   return text.length > 240 ? `${text.slice(0, 240)}...` : text
 }
 
+function shortHash(v: string, left = 8, right = 6) {
+  if (!v) return ''
+  if (v.length <= left + right + 3) return v
+  return `${v.slice(0, left)}...${v.slice(-right)}`
+}
+
+async function copyText(text: string) {
+  if (!text) return
+
+  try {
+    if (navigator?.clipboard?.writeText) {
+      await navigator.clipboard.writeText(text)
+      return
+    }
+  } catch {}
+
+  const ta = document.createElement('textarea')
+  ta.value = text
+  ta.style.position = 'fixed'
+  ta.style.left = '-9999px'
+  document.body.appendChild(ta)
+  ta.focus()
+  ta.select()
+  document.execCommand('copy')
+  document.body.removeChild(ta)
+}
+
 export default function ActionTransfer() {
   const nav = useNavigate()
 
@@ -124,6 +151,8 @@ export default function ActionTransfer() {
 
   const [sending, setSending] = useState(false)
   const [txMsg, setTxMsg] = useState('')
+  const [txHash, setTxHash] = useState('')
+  const [copiedTx, setCopiedTx] = useState(false)
   const [txErr, setTxErr] = useState('')
 
   const [friendlyErrorTitle, setFriendlyErrorTitle] = useState('')
@@ -476,7 +505,7 @@ export default function ActionTransfer() {
     })
 
     const receipt = (result as any)?.receipt || result
-    const txHash = (receipt as any)?.transactionHash || ''
+    const txHashValue = (receipt as any)?.transactionHash || ''
 
     const chainId = await getChainId(p)
 
@@ -490,11 +519,12 @@ export default function ActionTransfer() {
         tokenIn: 'ETH',
         amountIn: amountInput,
         to: recipient,
-        txHash
+        txHash: txHashValue
       }
     )
 
-    setTxMsg(`Sent successfully. tx=${txHash}`)
+    setTxMsg('Sent successfully')
+    setTxHash(txHashValue)
   }
 
   async function continueAfterZslWarning() {
@@ -527,6 +557,8 @@ export default function ActionTransfer() {
 
   async function send() {
     setTxMsg('')
+    setTxHash('')
+    setCopiedTx(false)
     setTxErr('')
     setRiskScore(null)
     setRiskReason('')
@@ -755,7 +787,12 @@ export default function ActionTransfer() {
             value={to}
             onChange={(e) => setTo(e.target.value)}
           />
-          <input className='input' placeholder='Amount (ETH)' value={amt} onChange={(e) => setAmt(e.target.value)} />
+          <input
+            className='input'
+            placeholder='Amount (ETH)'
+            value={amt}
+            onChange={(e) => setAmt(e.target.value)}
+          />
 
           <button className='btn btnPrimary' disabled={sending || zslReviewing || !dep} onClick={send}>
             {sending ? 'Sending…' : zslReviewing ? 'Reviewing…' : 'Send (AA UserOp)'}
@@ -806,7 +843,59 @@ export default function ActionTransfer() {
             </div>
           )}
 
-          {txMsg && <div style={{ marginTop: 10, color: 'var(--green)' }}>{txMsg}</div>}
+          {txMsg && (
+            <div
+              className='cardSoft'
+              style={{
+                marginTop: 10,
+                padding: 12,
+                border: '1px solid rgba(90,255,210,.18)',
+                background: 'rgba(90,255,210,.06)',
+              }}
+            >
+              <div style={{ color: 'var(--green)', fontWeight: 800 }}>
+                {txMsg}
+              </div>
+
+              {txHash && (
+                <div
+                  style={{
+                    marginTop: 8,
+                    display: 'flex',
+                    alignItems: 'center',
+                    justifyContent: 'space-between',
+                    gap: 10,
+                  }}
+                >
+                  <div
+                    className='small'
+                    style={{
+                      color: 'rgba(255,255,255,.82)',
+                      fontFamily: 'monospace',
+                      wordBreak: 'break-all',
+                      flex: 1,
+                    }}
+                  >
+                    Tx: {shortHash(txHash)}
+                  </div>
+
+                  <button
+                    type='button'
+                    className='btn btnGhost'
+                    style={{ minWidth: 0, padding: '6px 10px' }}
+                    onClick={async () => {
+                      await copyText(txHash)
+                      setCopiedTx(true)
+                      window.setTimeout(() => setCopiedTx(false), 1200)
+                    }}
+                  >
+                    {copiedTx ? 'Copied' : 'Copy'}
+                  </button>
+                </div>
+              )}
+            </div>
+          )}
+
           {txErr && <div style={{ marginTop: 10, color: 'rgba(255,77,90,.9)' }}>{txErr}</div>}
 
           <button className='btn btnGhost' onClick={() => nav('/trade')}>

@@ -15,6 +15,13 @@ type SwapQuoteResponse = {
 
 const API_BASE = 'http://127.0.0.1:8787'
 
+function formatTime(ts: string | number) {
+  const d = new Date(ts)
+  const hh = String(d.getHours()).padStart(2, '0')
+  const mm = String(d.getMinutes()).padStart(2, '0')
+  return `${hh}:${mm}`
+}
+
 export default function Trade() {
   const nav = useNavigate()
   const [quote, setQuote] = useState<SwapQuoteResponse | null>(null)
@@ -100,46 +107,37 @@ export default function Trade() {
     return quote?.bestRoute?.gasCostEth || 'N/A'
   }, [loading, err, quote])
 
-  const gasSubtitle = useMemo(() => {
-    if (loading) return 'Reading current on-chain transaction cost...'
-    if (err) return 'Unable to retrieve network gas information.'
+  const gasUsd = useMemo(() => {
+    if (loading) return 'Reading current network fee...'
+    if (err) return 'Unable to retrieve gas estimate.'
     return `≈ ${quote?.bestRoute?.gasCostUsdApprox || 'N/A'}`
   }, [loading, err, quote])
 
-  const assistantText = useMemo(() => {
-    if (loading) {
-      return 'AI is analyzing the current network conditions and transaction environment...'
-    }
-    if (err) {
-      return 'AI is currently unable to retrieve on-chain quote data. Please try again later.'
-    }
-    return 'AI has completed the transaction environment analysis. Navigate to the Send or Swap page to view detailed costs, paths, and recommendations for each operation.'
+  const statusLabel = useMemo(() => {
+    if (loading) return 'Syncing...'
+    if (err) return 'Offline'
+    return 'Ready'
   }, [loading, err])
 
   return (
     <Layout title='Transfer & Swap'>
       <div className='card' style={{ padding: 16 }}>
-        <div className='row' style={{ justifyContent: 'space-between' }}>
+        <div className='row' style={{ justifyContent: 'space-between', alignItems: 'flex-start' }}>
           <div>
-            <div className='small'>Network gas</div>
+            <div className='small'>Estimated network fee</div>
             <div className='h2'>{gasTitle}</div>
-          </div>
-          <div style={{ textAlign: 'right' }}>
-            <div className='small'>Status</div>
-            <div className='h2'>
-              {loading ? 'Syncing...' : err ? 'Offline' : 'Ready'}
+            <div className='small' style={{ marginTop: 6, opacity: 0.72 }}>
+              {gasUsd}
             </div>
           </div>
-        </div>
 
-        <div className='cardSoft' style={{ marginTop: 14, padding: 14 }}>
-          <div className='small'>{assistantText}</div>
-          <div className='small' style={{ marginTop: 8 }}>
-            {gasSubtitle}
+          <div style={{ textAlign: 'right' }}>
+            <div className='small'>Status</div>
+            <div className='h2'>{statusLabel}</div>
           </div>
         </div>
 
-        <div className='row g12' style={{ marginTop: 14 }}>
+        <div className='row g12' style={{ marginTop: 16 }}>
           <button
             className='btn btnPrimary'
             style={{ flex: 1 }}
@@ -167,14 +165,21 @@ export default function Trade() {
         )}
 
         {history.slice(0, 5).map((h, i) => (
-          <div key={i} style={{ marginTop: 12 }}>
+          <div
+            key={i}
+            style={{
+              marginTop: 12,
+              paddingTop: i === 0 ? 0 : 12,
+              borderTop: i === 0 ? 'none' : '1px solid rgba(255,255,255,.06)',
+            }}
+          >
             {h.type === 'swap' && (
               <>
-                <div className='small' style={{ fontWeight: 600 }}>
-                  {i + 1}. Swap {h.tokenIn} → {h.tokenOut}
+                <div className='small' style={{ fontWeight: 700 }}>
+                  Swap {h.tokenIn} → {h.tokenOut}
                 </div>
 
-                <div className='small'>
+                <div className='small' style={{ marginTop: 4 }}>
                   {h.amountIn} → {h.amountOut}
                 </div>
               </>
@@ -182,18 +187,18 @@ export default function Trade() {
 
             {h.type === 'transfer' && (
               <>
-                <div className='small' style={{ fontWeight: 600 }}>
-                  {i + 1}. Send {h.tokenIn}
+                <div className='small' style={{ fontWeight: 700 }}>
+                  Send {h.tokenIn}
                 </div>
 
-                <div className='small'>
+                <div className='small' style={{ marginTop: 4 }}>
                   {h.amountIn} to {h.to?.slice(0, 6)}...
                 </div>
               </>
             )}
 
-            <div className='small' style={{ opacity: 0.7 }}>
-              {new Date(h.time).toLocaleTimeString()}
+            <div className='small' style={{ marginTop: 4, opacity: 0.7 }}>
+              {formatTime(h.time)}
             </div>
           </div>
         ))}

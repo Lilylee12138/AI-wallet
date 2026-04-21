@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { ethers } from 'ethers'
 import Layout from '../../components/Layout'
 import { useNavigate } from 'react-router-dom'
@@ -160,8 +160,36 @@ function shortenError(raw: string) {
   return text.length > 240 ? `${text.slice(0, 240)}...` : text
 }
 
+function shortHash(v: string, left = 8, right = 6) {
+  if (!v) return ''
+  if (v.length <= left + right + 3) return v
+  return `${v.slice(0, left)}...${v.slice(-right)}`
+}
+
+async function copyText(text: string) {
+  if (!text) return
+
+  try {
+    if (navigator?.clipboard?.writeText) {
+      await navigator.clipboard.writeText(text)
+      return
+    }
+  } catch {}
+
+  const ta = document.createElement('textarea')
+  ta.value = text
+  ta.style.position = 'fixed'
+  ta.style.left = '-9999px'
+  document.body.appendChild(ta)
+  ta.focus()
+  ta.select()
+  document.execCommand('copy')
+  document.body.removeChild(ta)
+}
+
 export default function ActionSwap() {
   const nav = useNavigate()
+  const slippageRef = useRef<HTMLDivElement | null>(null)
 
   const [dep, setDep] = useState<any>(null)
 
@@ -171,6 +199,7 @@ export default function ActionSwap() {
 
   const [slippageMode, setSlippageMode] = useState<'auto' | '0.5' | '2' | 'custom'>('auto')
   const [customSlippage, setCustomSlippage] = useState('1.0')
+  const [slippageOpen, setSlippageOpen] = useState(false)
 
   const [quote, setQuote] = useState<SwapQuoteResponse | null>(null)
   const [quoteLoading, setQuoteLoading] = useState(false)
@@ -178,6 +207,8 @@ export default function ActionSwap() {
 
   const [sending, setSending] = useState(false)
   const [txMsg, setTxMsg] = useState('')
+  const [txHash, setTxHash] = useState('')
+  const [copiedTx, setCopiedTx] = useState(false)
   const [txErr, setTxErr] = useState('')
 
   const [friendlyErrorTitle, setFriendlyErrorTitle] = useState('')
@@ -188,6 +219,7 @@ export default function ActionSwap() {
   const [aiReply, setAiReply] = useState('')
   const [aiErr, setAiErr] = useState('')
   const [manualExplainOpen, setManualExplainOpen] = useState(false)
+  const [recommendedRouteOpen, setRecommendedRouteOpen] = useState(false)
 
   async function loadDep() {
     const p = getInjectedProvider()
@@ -218,12 +250,31 @@ export default function ActionSwap() {
   }, [])
 
   useEffect(() => {
+    const onClickOutside = (e: MouseEvent) => {
+      if (!slippageRef.current) return
+      if (!slippageRef.current.contains(e.target as Node)) {
+        setSlippageOpen(false)
+      }
+    }
+
+    if (slippageOpen) {
+      document.addEventListener('mousedown', onClickOutside)
+    }
+
+    return () => {
+      document.removeEventListener('mousedown', onClickOutside)
+    }
+  }, [slippageOpen])
+
+  useEffect(() => {
     let alive = true
 
     ;(async () => {
       try {
         setQuoteErr('')
         setTxMsg('')
+        setTxHash('')
+        setCopiedTx(false)
         setTxErr('')
         setFriendlyErrorTitle('')
         setFriendlyErrorMessage('')
@@ -312,6 +363,14 @@ export default function ActionSwap() {
     const min = amount * (1 - effectiveSlippagePct / 100)
     return `${min.toFixed(4)} ${symbol}`
   }, [quote, effectiveSlippagePct, tokenOut])
+
+  const shortRouteExplanation = useMemo(() => {
+    if (!quote?.bestRoute?.aiExplanation) return ''
+    const text = String(quote.bestRoute.aiExplanation).trim()
+    if (!text) return ''
+    const first = text.split('. ')[0]?.trim() || text
+    return first.endsWith('.') ? first : `${first}.`
+  }, [quote])
 
   useEffect(() => {
     try {
@@ -420,9 +479,11 @@ export default function ActionSwap() {
 
       setAiReply(j?.reply || '')
       setManualExplainOpen(true)
+      setRecommendedRouteOpen(true)
     } catch (e: any) {
       setAiErr(e?.message || String(e))
       setManualExplainOpen(true)
+      setRecommendedRouteOpen(true)
     } finally {
       setAiExplaining(false)
     }
@@ -466,6 +527,8 @@ export default function ActionSwap() {
 
   async function swap() {
     setTxMsg('')
+    setTxHash('')
+    setCopiedTx(false)
     setTxErr('')
     setFriendlyErrorTitle('')
     setFriendlyErrorMessage('')
@@ -522,12 +585,11 @@ export default function ActionSwap() {
           callData,
         })
 
-        const txHash =
+        const txHashValue =
           result?.receipt?.transactionHash ||
           result?.receipt?.hash ||
           'submitted'
-        
-        //添加交易记录
+
         const chainId = await getChainId(p)
         appendHistory(
           chainId,
@@ -540,11 +602,12 @@ export default function ActionSwap() {
             tokenOut,
             amountIn,
             amountOut: quote?.bestRoute?.expectedOut,
-            txHash
+            txHash: txHashValue
           }
         )
 
-        setTxMsg(`Swap success. tx=${txHash}`)
+        setTxMsg('Swap submitted successfully')
+        setTxHash(txHashValue)
       } else {
         const amountInWei = ethers.utils.parseEther(amountIn)
         if (amountInWei.lte(0)) throw new Error('Amount must be > 0')
@@ -589,12 +652,13 @@ export default function ActionSwap() {
           callData: swapCallData,
         })
 
-        const txHash =
+        const txHashValue =
           result?.receipt?.transactionHash ||
           result?.receipt?.hash ||
           'submitted'
 
-        setTxMsg(`Token swap success. tx=${txHash}`)
+        setTxMsg('Token swap submitted successfully')
+        setTxHash(txHashValue)
       }
 
       window.dispatchEvent(new Event('wallet-refresh'))
@@ -604,6 +668,29 @@ export default function ActionSwap() {
     } finally {
       setSending(false)
     }
+  }
+
+  function renderSlippageOption(label: string, value: 'auto' | '0.5' | '2' | 'custom') {
+    const active = slippageMode === value
+
+    return (
+      <button
+        className='btn'
+        style={{
+          justifyContent: 'flex-start',
+          background: active ? 'rgba(90,255,210,.12)' : '#132033',
+          border: active ? '1px solid rgba(90,255,210,.28)' : '1px solid rgba(255,255,255,.08)',
+          color: active ? 'rgba(230,255,245,.98)' : 'rgba(255,255,255,.88)',
+          boxShadow: active ? '0 0 0 1px rgba(90,255,210,.06) inset' : 'none',
+        }}
+        onClick={() => {
+          setSlippageMode(value)
+          if (value !== 'custom') setSlippageOpen(false)
+        }}
+      >
+        {label}
+      </button>
+    )
   }
 
   return (
@@ -696,9 +783,73 @@ export default function ActionSwap() {
       )}
 
       <div className='card' style={{ padding: 16 }}>
-        <div className='row' style={{ justifyContent: 'space-between', alignItems: 'center' }}>
+        <div
+          className='row'
+          style={{
+            justifyContent: 'space-between',
+            alignItems: 'flex-start',
+            position: 'relative'
+          }}
+        >
           <div className='h2'>Swap</div>
-          <div className='small'>Slippage: {presetToDisplay(slippageMode === 'custom' ? customSlippage : slippageMode)}</div>
+
+          <div ref={slippageRef} style={{ position: 'relative' }}>
+            <button
+              type='button'
+              className='btn btnGhost'
+              style={{
+                minWidth: 0,
+                padding: '8px 12px',
+                fontSize: 14
+              }}
+              onClick={() => setSlippageOpen(v => !v)}
+            >
+              Slippage: {presetToDisplay(slippageMode === 'custom' ? customSlippage : slippageMode)}
+            </button>
+
+            {slippageOpen && (
+              <div
+                style={{
+                  position: 'absolute',
+                  top: 'calc(100% + 8px)',
+                  right: 0,
+                  width: 220,
+                  padding: 14,
+                  zIndex: 30,
+                  background: '#0f1b2b',
+                  border: '1px solid rgba(255,255,255,0.08)',
+                  borderRadius: 14,
+                  boxShadow: '0 18px 60px rgba(0,0,0,.45)',
+                  backdropFilter: 'blur(8px)'
+                }}
+              >
+                <div className='small' style={{ marginBottom: 10, opacity: 0.76 }}>
+                  Slippage tolerance
+                </div>
+
+                <div style={{ display: 'grid', gap: 8 }}>
+                  {renderSlippageOption('Auto', 'auto')}
+                  {renderSlippageOption('0.5%', '0.5')}
+                  {renderSlippageOption('2%', '2')}
+                  {renderSlippageOption('Custom', 'custom')}
+                </div>
+
+                {slippageMode === 'custom' && (
+                  <div style={{ marginTop: 10 }}>
+                    <div className='small' style={{ marginBottom: 6, opacity: 0.76 }}>
+                      Custom slippage %
+                    </div>
+                    <input
+                      className='input'
+                      placeholder='1.0'
+                      value={customSlippage}
+                      onChange={(e) => setCustomSlippage(e.target.value)}
+                    />
+                  </div>
+                )}
+              </div>
+            )}
+          </div>
         </div>
 
         <div className='cardSoft' style={{ marginTop: 14, padding: 14 }}>
@@ -737,36 +888,7 @@ export default function ActionSwap() {
         </div>
 
         <div className='cardSoft' style={{ marginTop: 14, padding: 14 }}>
-          <div className='small'>Slippage tolerance</div>
-
-          <div className='row g12' style={{ marginTop: 10 }}>
-            <button className='btn btnGhost' onClick={() => setSlippageMode('auto')}>
-              Auto
-            </button>
-            <button className='btn btnGhost' onClick={() => setSlippageMode('0.5')}>
-              0.5%
-            </button>
-            <button className='btn btnGhost' onClick={() => setSlippageMode('2')}>
-              2%
-            </button>
-            <button className='btn btnGhost' onClick={() => setSlippageMode('custom')}>
-              Custom
-            </button>
-          </div>
-
-          {slippageMode === 'custom' && (
-            <input
-              className='input'
-              style={{ marginTop: 10 }}
-              placeholder='1.0'
-              value={customSlippage}
-              onChange={(e) => setCustomSlippage(e.target.value)}
-            />
-          )}
-        </div>
-
-        <div className='cardSoft' style={{ marginTop: 14, padding: 14 }}>
-          <div className='small'>Quote</div>
+          <div className='small'>Swap quote</div>
 
           {quoteLoading ? (
             <div className='small' style={{ marginTop: 8 }}>
@@ -778,64 +900,115 @@ export default function ActionSwap() {
             </div>
           ) : quote?.bestRoute ? (
             <>
-              <div className='small' style={{ marginTop: 8 }}>
-                Best route: {quote.bestRoute.path.join(' -> ')}
-              </div>
-              <div className='small'>Expected out: {quote.bestRoute.expectedOut}</div>
-              <div className='small'>Price impact: {quote.bestRoute.priceImpact}</div>
-              <div className='small'>Recommended slippage: {quote.bestRoute.recommendedSlippage}</div>
-              <div className='small'>Minimum received: {displayMinReceived}</div>
-              <div className='small'>
-                Gas cost: {quote.bestRoute.gasCostEth} / {quote.bestRoute.gasCostUsdApprox}
-              </div>
-              <div className='small' style={{ marginTop: 8 }}>
-                {quote.bestRoute.aiExplanation}
-              </div>
-
-              <div style={{ marginTop: 12 }}>
-                <button
-                  className='btn btnGhost'
-                  onClick={() => explainSwapWithAI('manual')}
-                  disabled={aiExplaining}
-                >
-                  {aiExplaining ? 'Explaining…' : 'Explain this route with AI'}
-                </button>
-              </div>
-
-              {manualExplainOpen && aiReply && !txErr && (
-                <div
-                  className='small'
-                  style={{
-                    marginTop: 12,
-                    opacity: 0.92,
-                    lineHeight: 1.6,
-                    whiteSpace: 'pre-wrap'
-                  }}
-                >
-                  <div style={{ marginBottom: 6, fontWeight: 700 }}>AI Explanation</div>
-                  <div>{aiReply}</div>
+              <div style={{ marginTop: 10, display: 'grid', gap: 8 }}>
+                <div className='row' style={{ justifyContent: 'space-between', gap: 12 }}>
+                  <div className='small' style={{ opacity: 0.72 }}>Expected out</div>
+                  <div className='small' style={{ textAlign: 'right' }}>
+                    {quote.bestRoute.expectedOut}
+                  </div>
                 </div>
-              )}
 
-              {aiErr && !txErr && (
-                <div style={{ marginTop: 10, color: 'rgba(255,77,90,.9)' }}>
-                  AI explain error: {aiErr}
+                <div className='row' style={{ justifyContent: 'space-between', gap: 12 }}>
+                  <div className='small' style={{ opacity: 0.72 }}>Price impact</div>
+                  <div className='small' style={{ textAlign: 'right' }}>
+                    {quote.bestRoute.priceImpact}
+                  </div>
+                </div>
+
+                <div className='row' style={{ justifyContent: 'space-between', gap: 12 }}>
+                  <div className='small' style={{ opacity: 0.72 }}>Minimum received</div>
+                  <div className='small' style={{ textAlign: 'right' }}>
+                    {displayMinReceived}
+                  </div>
+                </div>
+
+                <div className='row' style={{ justifyContent: 'space-between', gap: 12 }}>
+                  <div className='small' style={{ opacity: 0.72 }}>Gas cost</div>
+                  <div className='small' style={{ textAlign: 'right' }}>
+                    {quote.bestRoute.gasCostEth} / {quote.bestRoute.gasCostUsdApprox}
+                  </div>
+                </div>
+              </div>
+
+              <button
+                type='button'
+                className='btn btnGhost'
+                style={{ marginTop: 12 }}
+                onClick={() => setRecommendedRouteOpen(v => !v)}
+              >
+                {recommendedRouteOpen ? 'Recommended route ▲' : 'Recommended route ▼'}
+              </button>
+
+              {recommendedRouteOpen && (
+                <div style={{ marginTop: 12 }}>
+                  <div style={{ display: 'grid', gap: 8 }}>
+                    <div className='row' style={{ justifyContent: 'space-between', gap: 12 }}>
+                      <div className='small' style={{ opacity: 0.72 }}>Route</div>
+                      <div className='small' style={{ textAlign: 'right' }}>
+                        {quote.bestRoute.path.join(' -> ')}
+                      </div>
+                    </div>
+
+                    <div className='row' style={{ justifyContent: 'space-between', gap: 12 }}>
+                      <div className='small' style={{ opacity: 0.72 }}>Recommended slippage</div>
+                      <div className='small' style={{ textAlign: 'right' }}>
+                        {quote.bestRoute.recommendedSlippage}
+                      </div>
+                    </div>
+                  </div>
+
+                  {shortRouteExplanation && (
+                    <div className='small' style={{ marginTop: 12, opacity: 0.84, lineHeight: 1.55 }}>
+                      {shortRouteExplanation}
+                    </div>
+                  )}
+
+                  <div style={{ marginTop: 12 }}>
+                    <button
+                      className='btn btnGhost'
+                      onClick={() => explainSwapWithAI('manual')}
+                      disabled={aiExplaining}
+                    >
+                      {aiExplaining ? 'Explaining…' : 'Explain this route with AI'}
+                    </button>
+                  </div>
+
+                  {manualExplainOpen && aiReply && !txErr && (
+                    <div
+                      className='small'
+                      style={{
+                        marginTop: 12,
+                        opacity: 0.92,
+                        lineHeight: 1.6,
+                        whiteSpace: 'pre-wrap'
+                      }}
+                    >
+                      <div style={{ marginBottom: 6, fontWeight: 700 }}>AI Explanation</div>
+                      <div>{aiReply}</div>
+                    </div>
+                  )}
+
+                  {aiErr && !txErr && (
+                    <div style={{ marginTop: 10, color: 'rgba(255,77,90,.9)' }}>
+                      AI explain error: {aiErr}
+                    </div>
+                  )}
                 </div>
               )}
             </>
           ) : (
             <div className='small' style={{ marginTop: 8 }}>
-              请输入有效的 token 和 amount。
+              Please provide a valid token and amount.
             </div>
           )}
         </div>
 
-        <div className='small' style={{ marginTop: 12, opacity: 0.85 }}>
+        <div className='small' style={{ marginTop: 12, opacity: 0.85, lineHeight: 1.55 }}>
           {tokenIn === 'ETH'
-            ? 'This pair supports real ETH-origin AA swaps (the router will automatically wrap ETH to WETH).'
+            ? 'This pair supports real ETH-origin AA swaps. The router will automatically wrap ETH to WETH during execution.'
             : isExecutable
-            ? 'This pair supports real token-to-token AA swaps (the wallet will execute approve first, then perform the swap).'
-            : 'This pair currently supports AI quote analysis only. Real execution can be extended to token-to-ETH swaps in future versions.'}
+              ? 'This pair supports real token-to-token AA swaps. The wallet will approve the token first and then execute the swap.'
+              : 'This pair currently supports AI quote analysis only. Real execution can be extended to token-to-ETH swaps in future versions.'}
         </div>
 
         <div className='col g12' style={{ marginTop: 14 }}>
@@ -848,8 +1021,55 @@ export default function ActionSwap() {
           </button>
 
           {txMsg && (
-            <div style={{ marginTop: 10, color: 'var(--green)' }}>
-              {txMsg}
+            <div
+              className='cardSoft'
+              style={{
+                marginTop: 10,
+                padding: 12,
+                border: '1px solid rgba(90,255,210,.18)',
+                background: 'rgba(90,255,210,.06)',
+              }}
+            >
+              <div style={{ color: 'var(--green)', fontWeight: 800 }}>
+                {txMsg}
+              </div>
+
+              {txHash && (
+                <div
+                  style={{
+                    marginTop: 8,
+                    display: 'flex',
+                    alignItems: 'center',
+                    justifyContent: 'space-between',
+                    gap: 10,
+                  }}
+                >
+                  <div
+                    className='small'
+                    style={{
+                      color: 'rgba(255,255,255,.82)',
+                      fontFamily: 'monospace',
+                      wordBreak: 'break-all',
+                      flex: 1,
+                    }}
+                  >
+                    Tx: {shortHash(txHash)}
+                  </div>
+
+                  <button
+                    type='button'
+                    className='btn btnGhost'
+                    style={{ minWidth: 0, padding: '6px 10px' }}
+                    onClick={async () => {
+                      await copyText(txHash)
+                      setCopiedTx(true)
+                      window.setTimeout(() => setCopiedTx(false), 1200)
+                    }}
+                  >
+                    {copiedTx ? 'Copied' : 'Copy'}
+                  </button>
+                </div>
+              )}
             </div>
           )}
 

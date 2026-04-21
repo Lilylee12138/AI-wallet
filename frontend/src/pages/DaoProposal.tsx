@@ -151,6 +151,33 @@ function shortenError(raw: string) {
   return text.length > 240 ? `${text.slice(0, 240)}...` : text
 }
 
+function shortHash(v: string, left = 8, right = 6) {
+  if (!v) return ''
+  if (v.length <= left + right + 3) return v
+  return `${v.slice(0, left)}...${v.slice(-right)}`
+}
+
+async function copyText(text: string) {
+  if (!text) return
+
+  try {
+    if (navigator?.clipboard?.writeText) {
+      await navigator.clipboard.writeText(text)
+      return
+    }
+  } catch {}
+
+  const ta = document.createElement('textarea')
+  ta.value = text
+  ta.style.position = 'fixed'
+  ta.style.left = '-9999px'
+  document.body.appendChild(ta)
+  ta.focus()
+  ta.select()
+  document.execCommand('copy')
+  document.body.removeChild(ta)
+}
+
 export default function DaoProposal() {
   const nav = useNavigate()
   const { id } = useParams()
@@ -162,6 +189,8 @@ export default function DaoProposal() {
   const [loading, setLoading] = useState(false)
   const [sending, setSending] = useState(false)
   const [msg, setMsg] = useState('')
+  const [txHash, setTxHash] = useState('')
+  const [copiedTx, setCopiedTx] = useState(false)
   const [err, setErr] = useState('')
   const [st, setSt] = useState(0)
 
@@ -315,6 +344,8 @@ export default function DaoProposal() {
   async function vote(support: 1 | 2 | 3) {
     setSending(true)
     setMsg('')
+    setTxHash('')
+    setCopiedTx(false)
     setErr('')
     setFriendlyErrorTitle('')
     setFriendlyErrorMessage('')
@@ -382,7 +413,8 @@ export default function DaoProposal() {
         return
       }
 
-      setMsg(`Voted successfully. tx=${receipt.transactionHash}`)
+      setMsg('Voted successfully')
+      setTxHash(receipt.transactionHash)
       await refreshProposal()
     } catch (e: any) {
       const raw = e?.shortMessage || e?.reason || e?.message || String(e)
@@ -733,7 +765,59 @@ export default function DaoProposal() {
           totals: for {proposal?.forVotes || 0} • against {proposal?.againstVotes || 0} • abstain {proposal?.abstainVotes || 0}
         </div>
 
-        {msg && <div style={{ marginTop: 12, color: 'var(--green)' }}>{msg}</div>}
+        {msg && (
+          <div
+            className='cardSoft'
+            style={{
+              marginTop: 12,
+              padding: 12,
+              border: '1px solid rgba(90,255,210,.18)',
+              background: 'rgba(90,255,210,.06)',
+            }}
+          >
+            <div style={{ color: 'var(--green)', fontWeight: 800 }}>
+              {msg}
+            </div>
+
+            {txHash && (
+              <div
+                style={{
+                  marginTop: 8,
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'space-between',
+                  gap: 10,
+                }}
+              >
+                <div
+                  className='small'
+                  style={{
+                    color: 'rgba(255,255,255,.82)',
+                    fontFamily: 'monospace',
+                    wordBreak: 'break-all',
+                    flex: 1,
+                  }}
+                >
+                  Tx: {shortHash(txHash)}
+                </div>
+
+                <button
+                  type='button'
+                  className='btn btnGhost'
+                  style={{ minWidth: 0, padding: '6px 10px' }}
+                  onClick={async () => {
+                    await copyText(txHash)
+                    setCopiedTx(true)
+                    window.setTimeout(() => setCopiedTx(false), 1200)
+                  }}
+                >
+                  {copiedTx ? 'Copied' : 'Copy'}
+                </button>
+              </div>
+            )}
+          </div>
+        )}
+
         {err && <div style={{ marginTop: 12, color: 'rgba(255,77,90,.92)' }}>{err}</div>}
       </div>
     </Layout>

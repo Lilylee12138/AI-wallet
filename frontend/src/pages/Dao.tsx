@@ -103,16 +103,14 @@ export default function Dao() {
           <div className='small'>Error</div>
           <div style={{ marginTop: 8 }}>{err}</div>
           <div className='small' style={{ marginTop: 8 }}>
-            提示：请确认 MetaMask 连接 localhost:8545 (chainId=31337)，并已运行 deploy seed proposals
+            Hint: Please ensure MetaMask is connected to localhost:8545 (chainId=31337) and the deploy script has been run to seed proposals.
           </div>
         </div>
       )}
 
       <div className='card' style={{ padding: 16 }}>
         <div className='h2'>Active</div>
-        <div className='small' style={{ marginTop: 6 }}>
-          Snapshot-style UI • On-chain proposals (event-driven)
-        </div>
+        
 
         <div className='col g12' style={{ marginTop: 14 }}>
           {rows.map((r) => (
@@ -135,7 +133,7 @@ export default function Dao() {
             <div className='cardSoft' style={{ padding: 14 }}>
               <div className='small'>No proposals found</div>
               <div className='small' style={{ marginTop: 6 }}>
-                未检测到 ProposalCreated 事件。请确认 deploy 脚本已 seed。
+                No ProposalCreated event detected. Please make sure the deploy script has been properly seeded.
               </div>
             </div>
           )}
